@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <link rel="icon" type="image/svg+xml" href="/vite.svg"/>
+  <!-- 优化 viewport 支持 HiDPI -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>Tauri + Vue + Typescript App</title>
+  <style>
+      :root {
+          /* 这里的默认值必须和你的主题默认值完全一致 */
+          --dynamic-bg: #f3f3f3;
+          --dynamic-border: rgba(0, 0, 0, 0.1);
+      }
+
+      html, body {
+          margin: 0; padding: 0;
+          background-color: var(--dynamic-bg);
+          overflow: hidden;
+          /* HiDPI 优化：确保文字和图像在高 DPI 屏幕上清晰 */
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+          text-rendering: optimizeLegibility;
+      }
+
+      /* HiDPI 屏幕优化 */
+      @media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+          html {
+              /* 在 HiDPI 屏幕上使用更精细的渲染 */
+              image-rendering: -webkit-optimize-contrast;
+              image-rendering: crisp-edges;
+          }
+      }
+
+      /* 优化：#app 不要淡入，直接显示，只让骨架屏淡出 */
+      #app {
+          opacity: 1;
+      }
+
+      #startup-skeleton {
+          position: fixed; top: 0; left: 0;
+          width: 100vw; height: 100vh;
+          display: flex; flex-direction: column;
+          background: var(--dynamic-bg);
+          z-index: 9999;
+          pointer-events: none;
+          /* 缩短淡出时间，0.1s 足够，太长反而显得拖沓 */
+          transition: opacity 0.1s ease-out;
+      }
+
+      /* 像素级匹配 TitleBar */
+      .sk-title {
+          height: 32px; /* 与 TitleBar.vue 的 h-8 一致 */
+          border-bottom: 1px solid var(--dynamic-border);
+          background: var(--dynamic-bg);
+      }
+
+      .sk-content { flex: 1; }
+
+      /* 像素级匹配 ControlBar (只有在有图时才需要，冷启动默认为空) */
+      .sk-bottom {
+          height: 48px; /* 与 ControlBar.vue 的 h-12 一致 */
+          border-top: 1px solid var(--dynamic-border);
+          background: var(--dynamic-bg);
+          /* 初始不显示底栏，防止空界面启动时多出一个底栏块 */
+          display: none;
+      }
+  </style>
+  <script>
+      (function () {
+          const cfg = JSON.parse(localStorage.getItem('app_config_cache') || '{}');
+          const isLight = cfg.theme !== 'dark';
+          const bg = cfg.background_color || (isLight ? '#f3f3f3' : '#222222');
+          const border = isLight ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.1)';
+
+          document.documentElement.style.setProperty('--dynamic-bg', bg);
+          document.documentElement.style.setProperty('--dynamic-border', border);
+
+          // 如果是深色模式，立即给 html 加 class，防止 TitleBar 里的文字颜色闪烁
+          if (!isLight) document.documentElement.classList.add('dark');
+          else document.documentElement.classList.add('light');
+
+          window.addEventListener('DOMContentLoaded', () => {
+              // 1. 立即从 Rust 注入的变量获取路径
+              const path = window.__INITIAL_FILE__;
+              if (!path || path === "") return;
+
+              // 2. 立即转换协议并预加载
+              // 注意：这里需要硬编码协议前缀，因为 convertFileSrc 还没加载
+              const encodedPath = encodeURIComponent(path).replace(/%2F/g, '/').replace(/%5C/g, '/');
+              const src = `http://img.localhost/${encodedPath}`;
+
+              const img = new Image();
+              img.src = src;
+              img.decode().then(() => {
+                  // 标记预加载完成
+                  window.__FIRST_IMAGE_READY__ = true;
+                  window.__FIRST_IMAGE_SRC__ = src;
+              });
+          });
+      })();
+  </script>
+</head>
+
+<body>
+<div id="startup-skeleton">
+  <div class="sk-title"></div>
+  <div class="sk-content"></div>
+  <div class="sk-bottom"></div>
+</div>
+<div id="app"></div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

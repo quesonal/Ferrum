@@ -1,0 +1,103 @@
+/**
+ * HiDPI Support Styles
+ *
+ * 全面支持高 DPI 屏幕的 CSS 样式
+ */
+
+/* 基础 HiDPI 优化 */
+html {
+  /* 确保字体在所有屏幕上清晰 */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+
+  /* 防止移动端双击缩放 */
+  touch-action: manipulation;
+}
+
+/* 图片 HiDPI 优化 */
+img {
+  /* 默认使用高质量缩放 */
+  image-rendering: auto;
+}
+
+/* Canvas 和 SVG 优化 */
+canvas, svg {
+  image-rendering: auto;
+}
+
+/* 2x HiDPI 屏幕优化 (Retina, 4K 等) */
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+  html {
+    /* 在 HiDPI 屏幕上使用更精细的渲染 */
+    image-rendering: -webkit-optimize-contrast;
+  }
+
+  /* 细边框优化 */
+  .thin-border {
+    border-width: 0.5px;
+  }
+
+  /* 图标和按钮 */
+  .icon-crisp {
+    image-rendering: crisp-edges;
+  }
+}
+
+/* 3x HiDPI 屏幕 (iPhone Plus 等) */
+@media (-webkit-min-device-pixel-ratio: 3), (min-resolution: 288dpi) {
+  html {
+    image-rendering: -webkit-optimize-contrast;
+  }
+}
+
+/* 打印优化 */
+@media print {
+  img {
+    image-rendering: auto;
+  }
+}
+
+/* 减少动画（偏好设置） */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 暗色模式优化 */
+@media (prefers-color-scheme: dark) {
+  html {
+    /* 暗色模式下字体渲染优化 */
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* 全局滚动条 HiDPI 优化 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.5);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.7);
+}
+
+/* 针对 Windows 高 DPI 的特殊优化 */
+@media screen and (-ms-high-contrast: active), (-ms-high-contrast: none) {
+  /* IE/Edge 旧版高对比度模式 */
+  img {
+    image-rendering: auto;
+  }
+}

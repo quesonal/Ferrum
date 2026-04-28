@@ -12,6 +12,21 @@ const { config } = storeToRefs(configStore);
 
 const activeTab = ref<'general' | 'mouse'>('general');
 
+type MouseConfigKey = 'mouse_left' | 'mouse_right' | 'mouse_middle' | 'mouse_xbutton1' | 'mouse_xbutton2' | 'mouse_wheel_up' | 'mouse_wheel_down';
+
+const mouseButtons: { key: MouseConfigKey; label: string }[] =[
+  { key: 'mouse_left', label: 'Left Click' },
+  { key: 'mouse_right', label: 'Right Click' },
+  { key: 'mouse_middle', label: 'Middle Click' },
+  { key: 'mouse_xbutton1', label: 'Side Button 1 (Back)' },
+  { key: 'mouse_xbutton2', label: 'Side Button 2 (Forward)' },
+];
+
+const mouseWheels: { key: MouseConfigKey; label: string }[] =[
+  { key: 'mouse_wheel_up', label: 'Wheel Up' },
+  { key: 'mouse_wheel_down', label: 'Wheel Down' },
+];
+
 const actionOptions = [
   { label: '无操作', value: MouseAction.None },
   { label: '全屏', value: MouseAction.FullScreen },
@@ -32,7 +47,7 @@ const actionOptions = [
   { label: '适应窗口', value: MouseAction.FitWindow },
 ];
 
-const saveAndClose = async () => {
+const closeSettings = async () => {
   await configStore.saveConfig();
   emit('close');
 };
@@ -45,36 +60,54 @@ const predefinedColors = ['#1a1a1a', '#000000', '#ffffff', '#e5e7eb'];
 
 const scanningFolders = ref<Set<string>>(new Set());
 
+const triggerScan = async (path: string) => {
+  scanningFolders.value.add(path);
+  libraryStore.scanFolder(path, true, config.value.scan_mode)
+      .finally(() => {
+        scanningFolders.value.delete(path);
+      });
+};
+
 const addScanFolder = async () => {
   const selected = await open({
     directory: true,
     multiple: false,
     title: '选择扫描文件夹',
   });
-  if (selected && typeof selected === 'string') {
+  if (selected) {
     if (!config.value.scan_folders.includes(selected)) {
       config.value.scan_folders.push(selected);
+      triggerScan(selected);
     }
-    // 在后台触发扫描，不阻塞 UI
-    scanningFolders.value.add(selected);
-    libraryStore.scanFolder(selected, true, config.value.scan_mode)
-      .then(() => {
-        scanningFolders.value.delete(selected);
-      })
-      .catch(() => {
-        scanningFolders.value.delete(selected);
-      });
   }
 };
 
-const removeScanFolder = (index: number) => {
-  config.value.scan_folders.splice(index, 1);
+const removingFolders = ref<Set<string>>(new Set());
+
+const removeScanFolder = async (index: number) => {
+  const folderPath = config.value.scan_folders[index];
+
+  // 1. 视觉反馈：开始移除
+  removingFolders.value.add(folderPath);
+
+  try {
+    // 2. 调用 Store 里的清理逻辑
+    await libraryStore.removeLibrarySource(folderPath);
+
+    // 3. 从配置列表中真正移除
+    config.value.scan_folders.splice(index, 1);
+
+    // 4. 保存配置
+    await configStore.saveConfig();
+  } finally {
+    removingFolders.value.delete(folderPath);
+  }
 };
 </script>
 
 <template>
   <div class="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex justify-center items-center" @click.self="emit('close')">
-    <div class="bg-ui-bg w-140 h-110 rounded-lg shadow-2xl border border-ui-border text-ui-text overflow-hidden flex flex-col transition-colors">
+    <div class="bg-ui-bg w-140 max-h-[85vh] min-h-[520px] rounded-xl shadow-2xl border border-ui-border text-ui-text overflow-hidden flex flex-col transition-all">
 
       <!-- Header -->
       <div class="px-5 py-3 border-b border-ui-border bg-ui-hover flex justify-between items-center flex-none">
@@ -126,16 +159,23 @@ const removeScanFolder = (index: number) => {
               </div>
 
               <div class="flex items-center gap-3">
-                <input
-                    type="color"
-                    v-model="config.background_color"
-                    class="w-8 h-8 rounded cursor-pointer border-none bg-transparent p-0"
-                />
-                <div class="flex gap-2">
+                <div class="relative w-10 h-10 shrink-0">
+                  <input
+                      type="color"
+                      v-model="config.background_color"
+                      class="absolute inset-0 w-full h-full cursor-pointer border-none bg-transparent p-0
+                           [&::-webkit-color-swatch-wrapper]:p-0
+                           [&::-webkit-color-swatch]:rounded-full
+                           [&::-webkit-color-swatch]:border-2
+                           [&::-webkit-color-swatch]:border-ui-border"
+                  />
+                </div>
+                <div class="flex gap-2.5">
                   <button
                       v-for="color in predefinedColors"
                       :key="color"
-                      class="w-6 h-6 rounded-full border border-gray-500/30 cursor-pointer hover:scale-110 transition-transform"
+                      class="w-7 h-7 rounded-full border border-white/10 cursor-pointer hover:scale-110 active:scale-95 transition-all shadow-sm"
+                      :class="{ 'ring-2 ring-blue-500 ring-offset-2 ring-offset-ui-bg': config.background_color === color }"
                       :style="{ backgroundColor: color }"
                       @click="config.background_color = color"
                   ></button>
@@ -202,39 +242,59 @@ const removeScanFolder = (index: number) => {
             </div>
 
             <!-- Scan Folders -->
-            <div class="flex flex-col gap-2 border-t border-ui-border pt-4">
+            <div class="flex flex-col gap-3 pt-2 border-t border-ui-border/30">
               <div class="flex justify-between items-center">
-                <label class="text-xs text-ui-dim uppercase tracking-wider">Scan Folders</label>
+                <label class="text-[10px] font-bold text-ui-dim uppercase tracking-widest">Library Sources</label>
                 <button
                     @click="addScanFolder"
-                    :disabled="libraryStore.isLoading"
-                    class="text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-500 border-none cursor-pointer flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                    class="text-[11px] px-3 py-1 rounded-full bg-blue-600 text-white hover:bg-blue-500 border-none cursor-pointer flex items-center gap-1.5 transition-colors shadow-lg shadow-blue-900/20"
                 >
-                  <div class="i-mdi-plus text-xs"></div> Add
+                  <div class="i-mdi-plus"></div> Add Folder
                 </button>
               </div>
-              <div v-if="config.scan_folders.length === 0" class="text-xs text-ui-dim italic">
-                No folders configured. Add folders for quick access.
-              </div>
-              <div v-else class="flex flex-col gap-1 max-h-32 overflow-y-auto">
-                <div
-                    v-for="(folder, index) in config.scan_folders"
-                    :key="folder"
-                    class="flex items-center justify-between bg-ui-hover rounded px-2 py-1.5 text-sm"
-                    :class="{ 'opacity-70': scanningFolders.has(folder) }"
-                >
-                  <span class="truncate flex-1 mr-2" :title="folder">{{ folder }}</span>
-                  <div class="flex items-center gap-1">
-                    <div v-if="scanningFolders.has(folder)" class="i-mdi-loading animate-spin text-blue-500"></div>
-                    <button
-                        @click="removeScanFolder(index)"
-                        :disabled="scanningFolders.has(folder)"
-                        class="text-ui-dim hover:text-red-500 border-none bg-transparent cursor-pointer p-1 disabled:opacity-30"
-                    >
-                      <div class="i-mdi-delete text-sm"></div>
-                    </button>
-                  </div>
+
+              <!-- 优化 3：使用 TransitionGroup 实现流畅列表动画 -->
+              <div class="bg-ui-hover/50 rounded-xl border border-ui-border/50 min-h-24 p-2">
+                <div v-if="config.scan_folders.length === 0" class="flex flex-col items-center justify-center h-20 text-ui-dim opacity-50">
+                  <div class="i-mdi-folder-open text-2xl mb-1"></div>
+                  <span class="text-xs italic">No folders configured</span>
                 </div>
+
+                <TransitionGroup name="list" tag="div" class="flex flex-col gap-1.5">
+                  <div
+                      v-for="(folder, index) in config.scan_folders"
+                      :key="folder"
+                      class="flex items-center justify-between bg-ui-bg rounded-lg px-3 py-2 text-sm border border-ui-border/50 group"
+                      :class="{ 'opacity-60 grayscale-[0.5]': scanningFolders.has(folder) }"
+                  >
+                    <div class="flex flex-col min-width-0">
+                      <span class="truncate font-medium" :title="folder">{{ folder.split(/[\\/]/).pop() }}</span>
+                      <span class="text-[10px] text-ui-dim truncate opacity-70">{{ folder }}</span>
+                    </div>
+
+                    <div class="flex items-center gap-1 shrink-0 ml-4">
+                      <!-- Rescan 按钮 -->
+                      <button
+                          @click="triggerScan(folder)"
+                          :disabled="scanningFolders.has(folder)"
+                          class="p-1.5 rounded-md hover:bg-ui-hover text-ui-dim hover:text-blue-400 transition-colors border-none bg-transparent cursor-pointer disabled:cursor-not-allowed"
+                          title="Rescan Folder"
+                      >
+                        <div v-if="scanningFolders.has(folder)" class="i-mdi-loading animate-spin text-blue-500"></div>
+                        <div v-else class="i-mdi-refresh"></div>
+                      </button>
+
+                      <button
+                          @click="removeScanFolder(index)"
+                          :disabled="scanningFolders.has(folder)"
+                          class="p-1.5 rounded-md hover:bg-ui-hover text-ui-dim hover:text-red-500 transition-colors border-none bg-transparent cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Remove Source"
+                      >
+                        <div class="i-mdi-delete"></div>
+                      </button>
+                    </div>
+                  </div>
+                </TransitionGroup>
               </div>
             </div>
           </div>
@@ -242,17 +302,17 @@ const removeScanFolder = (index: number) => {
           <!-- Mouse Tab -->
           <div v-if="activeTab === 'mouse'" class="flex flex-col gap-4">
             <h3 class="text-xs font-bold text-ui-dim uppercase mb-2">Mouse Buttons</h3>
-            <div v-for="key in [['mouse_left', 'Left Click'], ['mouse_right', 'Right Click'], ['mouse_middle', 'Middle Click'], ['mouse_xbutton1', 'Side Button 1 (Back)'], ['mouse_xbutton2', 'Side Button 2 (Forward)']]" :key="key[0]" class="flex items-center justify-between">
-              <span class="text-sm">{{ key[1] }}</span>
-              <select v-model="(config as any)[key[0]]" class="bg-ui-hover text-ui-text border border-ui-border rounded px-2 py-1 text-sm w-40 outline-none">
+            <div v-for="item in mouseButtons" :key="item.key" class="flex items-center justify-between">
+              <span class="text-sm">{{ item.label }}</span>
+              <select v-model="config[item.key]" class="bg-ui-hover text-ui-text border border-ui-border rounded px-2 py-1 text-sm w-40 outline-none">
                 <option v-for="opt in actionOptions" :value="opt.value">{{ opt.label }}</option>
               </select>
             </div>
 
             <h3 class="text-xs font-bold text-ui-dim uppercase mt-4 mb-2">Mouse Wheel</h3>
-            <div v-for="key in [['mouse_wheel_up', 'Wheel Up'], ['mouse_wheel_down', 'Wheel Down']]" :key="key[0]" class="flex items-center justify-between">
-              <span class="text-sm">{{ key[1] }}</span>
-              <select v-model="(config as any)[key[0]]" class="bg-ui-hover text-ui-text border border-ui-border rounded px-2 py-1 text-sm w-40 outline-none">
+            <div v-for="item in mouseWheels" :key="item.key" class="flex items-center justify-between">
+              <span class="text-sm">{{ item.label }}</span>
+              <select v-model="config[item.key]" class="bg-ui-hover text-ui-text border border-ui-border rounded px-2 py-1 text-sm w-40 outline-none">
                 <option v-for="opt in actionOptions" :value="opt.value">{{ opt.label }}</option>
               </select>
             </div>
@@ -262,8 +322,7 @@ const removeScanFolder = (index: number) => {
 
       <!-- Footer -->
       <div class="px-5 py-3 bg-ui-hover flex justify-end gap-3 border-t border-ui-border flex-none">
-        <button class="px-4 py-1.5 rounded text-sm text-ui-dim hover:bg-ui-hover transition-colors border-none bg-transparent cursor-pointer" @click="emit('close')">Cancel</button>
-        <button class="px-4 py-1.5 rounded text-sm bg-blue-600 text-white hover:bg-blue-500 border-none cursor-pointer" @click="saveAndClose">Save</button>
+        <button class="px-4 py-1.5 rounded text-sm bg-blue-600 text-white hover:bg-blue-500 border-none cursor-pointer" @click="closeSettings">Done</button>
       </div>
     </div>
   </div>

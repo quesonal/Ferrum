@@ -106,8 +106,6 @@ fn get_config_path<R: Runtime>(app: &AppHandle<R>) -> AppResult<PathBuf> {
 }
 
 pub fn load_config<R: Runtime>(app: &AppHandle<R>) -> AppConfig {
-    // 这里的策略是：如果读取失败，回退到默认值，而不是抛出错误导致应用无法启动
-    // 但我们会尝试解析。
     let path = match get_config_path(app) {
         Ok(p) => p,
         Err(_) => return AppConfig::default(),
@@ -117,10 +115,19 @@ pub fn load_config<R: Runtime>(app: &AppHandle<R>) -> AppConfig {
         return AppConfig::default();
     }
 
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| toml::from_str(&content).ok())
-        .unwrap_or_default()
+    match fs::read_to_string(path) {
+        Ok(content) => match toml::from_str::<AppConfig>(&content) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("[Config] Failed to parse config.toml: {}, using defaults", e);
+                AppConfig::default()
+            }
+        },
+        Err(e) => {
+            eprintln!("[Config] Failed to read config file: {}, using defaults", e);
+            AppConfig::default()
+        }
+    }
 }
 
 pub fn save_config<R: Runtime>(app: &AppHandle<R>, config: &AppConfig) -> AppResult<()> {

@@ -85,15 +85,18 @@
               const path = window.__INITIAL_FILE__;
               if (!path || path === "") return;
 
-              // 2. 立即转换协议并预加载
-              // 注意：这里需要硬编码协议前缀，因为 convertFileSrc 还没加载
+              // 2. 立即转换协议并预加载（与 imageStore.getImageSrc 保持一致的协议选择）
+              const nativeExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg', 'ico', 'bmp'];
+              const ext = path.split('.').pop()?.toLowerCase() || '';
+              const isNative = nativeExts.includes(ext);
               const encodedPath = encodeURIComponent(path).replace(/%2F/g, '/').replace(/%5C/g, '/');
-              const src = `http://img.localhost/${encodedPath}`;
+              const src = isNative
+                  ? `https://asset.localhost/${encodedPath}`
+                  : `http://img.localhost/${encodedPath}`;
 
               const img = new Image();
               img.src = src;
               img.decode().then(() => {
-                  // 标记预加载完成
                   window.__FIRST_IMAGE_READY__ = true;
                   window.__FIRST_IMAGE_SRC__ = src;
               });

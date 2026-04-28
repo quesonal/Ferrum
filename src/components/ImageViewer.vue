@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, useTemplateRef, watch } from 'vue';
+import {computed, ref, useTemplateRef, watch} from 'vue';
 import { usePanZoom } from '../composables/usePanZoom';
 import ThumbnailNavigator from './ThumbnailNavigator.vue';
 
-const props = defineProps<{ src: string }>();
+const props = defineProps<{
+  src: string;
+  previewSrc?: string | null;
+  previewOrigWidth?: number;
+  previewOrigHeight?: number;
+}>();
 const emit = defineEmits(['update:scale', 'load']);
 
 // --- 状态 ---
@@ -40,6 +45,14 @@ const showThumbnail = computed(() => {
   return !!(props.src && imageNaturalSize.value.width > 0 && scale.value > minScale.value);
 });
 
+const previewFitScale = computed(() => {
+  if (!props.previewOrigWidth || !props.previewOrigHeight) return 1;
+  const vpw = viewportRef.value?.clientWidth ?? window.innerWidth;
+  const vph = viewportRef.value?.clientHeight ?? window.innerHeight;
+  if (!vpw || !vph) return 1;
+  return Math.min(vpw / props.previewOrigWidth, vph / props.previewOrigHeight);
+});
+
 const updateViewportSize = () => {
   if (viewportRef.value) {
     viewportSize.value = {
@@ -67,9 +80,6 @@ const calculateAndSetMinScale = (imgWidth: number, imgHeight: number) => {
 // 监听外界传入的新图片地址
 watch(() => props.src, (newPath) => {
   if (!newPath) {
-    activeSlot.value = null;
-    slotA.value.src = '';
-    slotB.value.src = '';
     pendingSrc.value = null;
     return;
   }
@@ -114,20 +124,38 @@ const applyImageToSlot = (slotName: 'A' | 'B', imgEl: HTMLImageElement) => {
   const sY = vph / imgEl.naturalHeight;
   const newScale = Math.min(sX, sY, 1);
 
-  scale.value = newScale;
-  translate.value = { x: 0, y: 0 };
+  const targetSlot = slotName === 'A' ? slotA : slotB;
+  targetSlot.value.scale = newScale;
+  targetSlot.value.x = 0;
+  targetSlot.value.y = 0;
 
   activeSlot.value = slotName;
   pendingSrc.value = null;
+
+  scale.value = newScale;
+  translate.value = { x: 0, y: 0 };
 
   emit('load');
   emit('update:scale', newScale);
 };
 
-// 真正完成加载的回调（由背后隐藏的 DOM <img> 触发）
-const handleImageLoad = (slotName: 'A' | 'B', imgEl: HTMLImageElement) => {
+// 真正完成加载的回调
+const handleImageLoad = async (slotName: 'A' | 'B', imgEl: HTMLImageElement) => {
   const slotState = slotName === 'A' ? slotA.value : slotB.value;
+  // 如果在加载期间用户已经切到了别的图，直接废弃
   if (pendingSrc.value && slotState.src !== pendingSrc.value) return;
+
+  try {
+    // 【核心修复】：强制浏览器在后台完成图像光栅化解码
+    // 这样切换时图片像素已经存在于 GPU/内存中，绝对不会闪烁
+    await imgEl.decode();
+  } catch (e) {
+    console.warn('图片解码被中断或失败', e);
+  }
+
+  // 解码可能耗时几十毫秒，需要再次确认用户是否已经切图
+  if (pendingSrc.value && slotState.src !== pendingSrc.value) return;
+
   applyImageToSlot(slotName, imgEl);
 };
 
@@ -139,11 +167,24 @@ const handleImageError = (slotName: 'A' | 'B') => {
   }
 };
 
+// 将共享的 pan/zoom 状态同步到当前活跃 slot 的独立 transform
+watch([scale, translate], () => {
+  if (activeSlot.value === 'A') {
+    slotA.value.scale = scale.value;
+    slotA.value.x = translate.value.x;
+    slotA.value.y = translate.value.y;
+  } else if (activeSlot.value === 'B') {
+    slotB.value.scale = scale.value;
+    slotB.value.x = translate.value.x;
+    slotB.value.y = translate.value.y;
+  }
+});
+
 defineExpose({
   zoomIn, zoomOut, handleWheel, startDrag,
   fitToScreen: () => {
-    const img = activeImgRef;
-    if (img) fitToScreen(img.value);
+    const img = activeImgRef.value;
+    if (img) fitToScreen(img);
   },
 });
 </script>
@@ -154,35 +195,58 @@ defineExpose({
       class="w-full h-full overflow-hidden relative flex justify-center items-center outline-none bg-transparent active:cursor-grabbing"
       @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag" @mousedown="startDrag"
   >
+    <!-- Slot A -->
     <img
         v-if="slotA.src"
-        v-show="activeSlot === 'A'"
         ref="imgARef"
         :src="slotA.src"
         :style="{
-          transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
-        }"
-        class="max-w-none max-h-none block shadow-2xl instant-img absolute"
+      transform: `translate(${slotA.x}px, ${slotA.y}px) scale(${slotA.scale})`,
+    }"
+        :class="[
+      'max-w-none max-h-none block shadow-2xl instant-img absolute transition-opacity duration-0',
+      activeSlot === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+    ]"
         draggable="false"
-        decoding="sync"
+        decoding="async"
         @load="handleImageLoad('A', $event.target as HTMLImageElement)"
         @error="handleImageError('A')"
-        alt="" />
+        alt=""
+    />
 
+    <!-- Slot B -->
     <img
         v-if="slotB.src"
-        v-show="activeSlot === 'B'"
         ref="imgBRef"
         :src="slotB.src"
         :style="{
-          transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
-        }"
-        class="max-w-none max-h-none block shadow-2xl instant-img absolute"
+      transform: `translate(${slotB.x}px, ${slotB.y}px) scale(${slotB.scale})`,
+    }"
+        :class="[
+      'max-w-none max-h-none block shadow-2xl instant-img absolute transition-opacity duration-0',
+      activeSlot === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+    ]"
         draggable="false"
-        decoding="sync"
+        decoding="async"
         @load="handleImageLoad('B', $event.target as HTMLImageElement)"
         @error="handleImageError('B')"
-        alt="" />
+        alt=""
+    />
+
+    <!-- 预览图层：按原图比例渲染，与主图同一坐标空间；opacity 切换与主图同 compositor 层，避免背景闪现 -->
+    <img
+        v-if="previewSrc && previewOrigWidth && previewOrigHeight"
+        :src="previewSrc"
+        :width="previewOrigWidth"
+        :height="previewOrigHeight"
+        :style="{ transform: `translate(0px, 0px) scale(${previewFitScale})` }"
+        :class="[
+          'max-w-none max-h-none block absolute preview-img',
+          (!activeSlot || pendingSrc) ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        ]"
+        draggable="false"
+        alt="preview"
+    />
 
     <slot name="empty" v-if="!activeSlot"></slot>
 
@@ -203,10 +267,15 @@ defineExpose({
 </template>
 
 <style scoped>
+.preview-img {
+  z-index: 5;
+  background: transparent;
+}
+
 .instant-img {
   will-change: transform;
   image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
+  image-rendering: auto;
   backface-visibility: hidden;
   -webkit-font-smoothing: antialiased;
 }

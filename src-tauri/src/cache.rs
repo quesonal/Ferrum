@@ -26,7 +26,7 @@ impl TranscodeCache {
 
     /// 获取缓存的图片数据
     pub fn get(&self, path: &str) -> Option<Vec<u8>> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().expect("cache mutex poisoned");
 
         if let Some(entry) = entries.get_mut(path) {
             // 检查是否过期
@@ -44,9 +44,9 @@ impl TranscodeCache {
 
     /// 添加图片到缓存
     pub fn put(&self, path: String, data: Vec<u8>) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().expect("cache mutex poisoned");
 
-        // 如果缓存已满，移除最旧的条目（简单实现：随机移除）
+        // 如果缓存已满，移除最旧的条目
         if entries.len() >= self.max_size && !entries.contains_key(&path) {
             if let Some(oldest_key) = entries
                 .iter()
@@ -65,7 +65,7 @@ impl TranscodeCache {
 
     /// 清空缓存
     pub fn clear(&self) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().expect("cache mutex poisoned");
         entries.clear();
     }
 }

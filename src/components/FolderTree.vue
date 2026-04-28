@@ -43,23 +43,8 @@ onMounted(() => {
     if (store.expandedNodes.size === 0) store.expandAllNodes(store.folderTree);
     else store.updateVisibleTree();
   }
-});
 
-onMounted(() => {
-  if (containerRef.value) {
-    resizeObserver = new ResizeObserver((entries) => {
-      containerHeight.value = entries[0].contentRect.height;
-    });
-    resizeObserver.observe(containerRef.value);
-  }
-
-  // 初始加载展开逻辑
-  if (store.visibleTreeNodes.length === 0 && store.folderTree.length > 0) {
-    if (store.expandedNodes.size === 0) store.expandAllNodes(store.folderTree);
-    else store.updateVisibleTree();
-  }
-
-  // 【新增】恢复滚动位置
+  // 恢复滚动位置
   nextTick(() => {
     restoreScroll();
   });
@@ -101,15 +86,15 @@ function handleSelect(hash: string | null, path: string) {
   emit('select', hash, path);
 }
 
-function formatCount(count: number): string {
-  if (count >= 10000) {
-    return (count / 10000).toFixed(1) + 'w';
-  }
-  if (count >= 1000) {
-    return (count / 1000).toFixed(1) + 'k';
-  }
-  return count.toString();
-}
+// function formatCount(count: number): string {
+//   if (count >= 10000) {
+//     return (count / 10000).toFixed(1) + 'w';
+//   }
+//   if (count >= 1000) {
+//     return (count / 1000).toFixed(1) + 'k';
+//   }
+//   return count.toString();
+// }
 </script>
 
 <template>
@@ -132,7 +117,7 @@ function formatCount(count: number): string {
         <div class="folder-info">
           <span class="folder-name" :title="item.node.path">{{ item.node.name }}</span>
           <span class="image-count">
-            {{ formatCount(item.node.totalImageCount) }}
+            {{ item.node.totalImageCount }}
           </span>
         </div>
       </div>

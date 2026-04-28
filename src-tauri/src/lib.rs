@@ -85,11 +85,13 @@ pub fn run() {
             library_get_all_images,
             library_get_total_image_count,
             library_read_thumbnail,
+            library_read_thumbnails_batch,
             library_read_preview,
             library_get_stats,
             library_compact,
             library_mark_deleted,
             library_get_image_path,
+            library_remove_source,
         ])
         .register_uri_scheme_protocol("img", |ctx, req| protocol::img_protocol_handler(&ctx, &req))
         .run(tauri::generate_context!())

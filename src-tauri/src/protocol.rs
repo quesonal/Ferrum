@@ -1,9 +1,7 @@
 use crate::cache::TRANSCODE_CACHE;
 use crate::formats;
-use memmap2::Mmap;
 use std::fs::File;
 use std::io::{BufReader, Cursor};
-use std::path::PathBuf;
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::Runtime;
 use url::Url;
@@ -35,7 +33,10 @@ pub fn img_protocol_handler<R: Runtime>(
     let url_str = request.uri().to_string();
     let url = match Url::parse(&url_str) {
         Ok(u) => u,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid URL".into()),
+        Err(e) => {
+            eprintln!("[Protocol] URL parse error: {}", e);
+            return error_response(StatusCode::BAD_REQUEST, "Invalid URL".into());
+        }
     };
 
     // 3. 路径解码
@@ -45,12 +46,23 @@ pub fn img_protocol_handler<R: Runtime>(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, format!("Decode error: {}", e)),
     };
 
-    let path = PathBuf::from(decoded_path.as_ref());
-    if !path.exists() {
-        return error_response(StatusCode::NOT_FOUND, "File not found".into());
+    // 防止空字节注入
+    if decoded_path.contains('\0') {
+        return error_response(StatusCode::BAD_REQUEST, "Invalid path".into());
     }
 
-    let ext = path
+    // 解析为规范化的绝对路径，防止路径穿越攻击
+    let canonical_path = match std::fs::canonicalize(decoded_path.as_ref()) {
+        Ok(p) => p,
+        Err(_) => return error_response(StatusCode::NOT_FOUND, "File not found".into()),
+    };
+
+    // 验证是文件而非目录
+    if !canonical_path.is_file() {
+        return error_response(StatusCode::NOT_FOUND, "Not a file".into());
+    }
+
+    let ext = canonical_path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
@@ -63,55 +75,19 @@ pub fn img_protocol_handler<R: Runtime>(
 
     // 5. 判断是否需要转码
     if !formats::needs_transcode(&ext) {
-        // 原生支持格式 - 使用内存映射加速大文件读取
-        let mime = mime_guess::from_path(&path).first_or_octet_stream();
+        let mime = mime_guess::from_path(&canonical_path).first_or_octet_stream();
 
-        // 获取文件大小，决定读取策略
-        let file_size = match std::fs::metadata(&path) {
-            Ok(meta) => meta.len(),
+        match std::fs::read(&canonical_path) {
+            Ok(data) => return response_builder
+                .header(header::CONTENT_TYPE, mime.as_ref())
+                .body(data)
+                .unwrap(),
             Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        };
-
-        // 小文件(<512KB)直接读取，大文件使用内存映射
-        const MMAP_THRESHOLD: u64 = 512 * 1024;
-
-        return if file_size < MMAP_THRESHOLD {
-            // 小文件：直接读取更高效
-            match std::fs::read(&path) {
-                Ok(data) => response_builder
-                    .header(header::CONTENT_TYPE, mime.as_ref())
-                    .body(data)
-                    .unwrap(),
-                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            }
-        } else {
-            // 大文件：使用内存映射减少内存拷贝
-            match File::open(&path) {
-                Ok(file) => match unsafe { Mmap::map(&file) } {
-                    Ok(mmap) => response_builder
-                        .header(header::CONTENT_TYPE, mime.as_ref())
-                        .body(mmap.to_vec())
-                        .unwrap(),
-                    Err(_) => {
-                        // 回退到常规读取
-                        match std::fs::read(&path) {
-                            Ok(data) => response_builder
-                                .header(header::CONTENT_TYPE, mime.as_ref())
-                                .body(data)
-                                .unwrap(),
-                            Err(e) => {
-                                error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-                            }
-                        }
-                    }
-                },
-                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            }
-        };
+        }
     }
 
     // 6. 转码逻辑 (WebP) - 带缓存
-    let cache_key = path.to_string_lossy().to_string();
+    let cache_key = canonical_path.to_string_lossy().to_string();
 
     // 先检查缓存
     if let Some(cached_data) = TRANSCODE_CACHE.get(&cache_key) {
@@ -123,14 +99,14 @@ pub fn img_protocol_handler<R: Runtime>(
     }
 
     // 缓存未命中，执行转码
-    let transcode_result = (|| -> anyhow::Result<Vec<u8>> {
-        let file = File::open(&path)?;
+    let transcode_result: anyhow::Result<Vec<u8>> = (|| {
+        let file = File::open(&canonical_path)?;
         let reader = BufReader::new(file);
 
         // 使用流式解码减少内存占用
         let mut img = image::load(
             reader,
-            image::ImageFormat::from_path(&path).unwrap_or(image::ImageFormat::Jpeg),
+            image::ImageFormat::from_path(&canonical_path).unwrap_or(image::ImageFormat::Jpeg),
         )?;
 
         // 限制最大分辨率，避免超大图片导致性能问题
@@ -162,7 +138,7 @@ pub fn img_protocol_handler<R: Runtime>(
         }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Transcode failed: {:#}", e),
+            format!("Transcode failed: {}", e),
         ),
     }
 }

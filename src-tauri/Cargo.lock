@@ -361,7 +361,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1241,7 +1241,7 @@ dependencies = [
 [[package]]
 name = "everything-rs-binding"
 version = "0.1.0"
-source = "git+https://github.com/quesonal/index_vault#aa8a0d7f9971443eb86c3b412bd0a9aaa5e82d6f"
+source = "git+https://github.com/quesonal/index_vault#cdaff63291e9945dc5c91f9a0d8e21b1ad9bb04f"
 dependencies = [
  "bindgen",
 ]
@@ -1249,7 +1249,7 @@ dependencies = [
 [[package]]
 name = "everything-wrap"
 version = "0.2.0"
-source = "git+https://github.com/quesonal/index_vault#aa8a0d7f9971443eb86c3b412bd0a9aaa5e82d6f"
+source = "git+https://github.com/quesonal/index_vault#cdaff63291e9945dc5c91f9a0d8e21b1ad9bb04f"
 dependencies = [
  "everything-rs-binding",
  "widestring",
@@ -1339,7 +1339,6 @@ dependencies = [
  "index_vault",
  "jxl-oxide",
  "kamadak-exif",
- "memmap2",
  "mime_guess",
  "once_cell",
  "os_info",
@@ -1354,6 +1353,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
  "thiserror 2.0.18",
+ "tokio",
  "toml 0.9.11+spec-1.1.0",
  "url",
  "urlencoding",
@@ -2182,7 +2182,7 @@ checksum = "e7c5cedc30da3a610cac6b4ba17597bdf7152cf974e8aab3afb3d54455e371c8"
 [[package]]
 name = "index_vault"
 version = "0.1.0"
-source = "git+https://github.com/quesonal/index_vault#aa8a0d7f9971443eb86c3b412bd0a9aaa5e82d6f"
+source = "git+https://github.com/quesonal/index_vault#cdaff63291e9945dc5c91f9a0d8e21b1ad9bb04f"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2198,6 +2198,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "twox-hash",
  "walkdir",
  "webp",
@@ -2285,9 +2286,9 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]

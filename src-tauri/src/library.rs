@@ -2,14 +2,18 @@
 //!
 //! Integrates index_vault for high-performance thumbnail storage and indexing
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager, State};
 
+use index_vault::pipeline::ScanEvent;
+use index_vault::storage::index::SortKey;
 use index_vault::Db;
+
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
 
 use crate::error::AppError;
 
@@ -20,7 +24,7 @@ pub struct LibraryState {
 }
 
 struct LibraryStateInner {
-    db: Mutex<Option<Db>>,
+    db: Arc<Mutex<Option<Db>>>,
     db_path: PathBuf,
     is_scanning: Mutex<bool>,
 }
@@ -35,7 +39,7 @@ impl LibraryState {
 
         Self {
             inner: Arc::new(LibraryStateInner {
-                db: Mutex::new(None),
+                db: Arc::new(Mutex::new(None)),
                 db_path,
                 is_scanning: Mutex::new(false),
             }),
@@ -43,18 +47,13 @@ impl LibraryState {
     }
 
     fn ensure_open(&self) -> Result<(), AppError> {
-        if *self.inner.is_scanning.lock().map_err(|_| AppError::LockPoisoned)? {
-            return Err(AppError::LibraryBusy);
-        }
-
         let mut db_guard = self.inner.db.lock().map_err(|_| AppError::LockPoisoned)?;
 
         if db_guard.is_none() {
-            let db = Db::open(&self.inner.db_path)
-                .map_err(|e| AppError::LibraryError(e.to_string()))?;
+            let db =
+                Db::open(&self.inner.db_path).map_err(|e| AppError::LibraryError(e.to_string()))?;
             *db_guard = Some(db);
         }
-
         Ok(())
     }
 
@@ -156,97 +155,69 @@ pub async fn library_get_folders(
 pub async fn library_get_folder_tree(
     state: State<'_, LibraryState>,
 ) -> Result<Vec<index_vault::storage::folder_node::FolderNode>, AppError> {
-    state.with_db(|db| {
-        let summaries = db.list_folders();
-        let tree = Db::build_directory_tree(summaries);
-        Ok(tree)
-    })
+    state.with_db(|db| Ok(db.get_folder_tree()))
 }
 
-/// Scan folder for images - run full pipeline
+/// Scan folder for images
+/// TODO move to index_vault
 #[tauri::command]
 pub async fn library_scan_folder(
+    app: AppHandle,
     state: State<'_, LibraryState>,
     request: ScanRequest,
 ) -> Result<u32, AppError> {
-    use index_vault::pipeline::run_full_pipeline_with_mft;
-    use std::path::Path;
+    let extensions: &[&str] = &[
+        "jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "gif", "tga", "dds", "jxl", "exr",
+        "rw2", "arw", "nef", "cr2", "cr3", "dng", "orf", "raf",
+    ];
 
+    let state_inner = state.inner.clone();
+    let db = state_inner.db.clone();
     let folder_path = PathBuf::from(&request.folder_path);
+    let use_mft = request.scan_mode.to_lowercase() == "mft";
 
-    if !folder_path.exists() {
-        return Err(AppError::PathNotFound(request.folder_path));
+    // 创建跨线程通道
+    let (tx, mut rx) = mpsc::channel::<ScanEvent>(50);
+
+    // 启动扫描流水线
+    tauri::async_runtime::spawn_blocking(move || {
+        index_vault::pipeline::run_incremental_pipeline(db, &folder_path, extensions, use_mft, tx);
+    });
+
+    // 在异步上下文中处理接收到的事件
+    let mut total_processed = 0;
+    while let Some(event) = rx.recv().await {
+        match event {
+            ScanEvent::Progress { current, total } => {
+                let _ = app.emit("library-scan-progress", (current, total));
+            }
+            ScanEvent::IncrementalUpdated => {
+                let _ = app.emit("library-db-incremental-update", ());
+            }
+            ScanEvent::Completed(count) => {
+                total_processed = count;
+                let _ = app.emit("library-db-updated", ());
+            }
+            ScanEvent::Failed(err) => {
+                return Err(AppError::LibraryError(err));
+            }
+        }
     }
 
-    // Clone state for use in blocking task
-    let state_clone = state.inner.clone();
-    let folder_path_clone = folder_path.clone();
-    let db_path_clone = state.inner.db_path.clone();
-    let scan_mode = request.scan_mode.to_lowercase();
+    Ok(total_processed)
+}
 
-    // Map scan_mode to use_mft flag
-    // - everything: use_mft=false (everything is handled by index_vault internally)
-    // - mft: use_mft=true
-    // - walkdir/auto: use_mft=false
-    let use_mft = scan_mode == "mft";
-
-    // Run full pipeline in blocking task using std::thread
-    // Take DB out of mutex to avoid holding the lock during the long scan,
-    // preventing other library commands from blocking.
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<u32, AppError> {
-        use index_vault::Db;
-
-        // Open DB if needed, then take ownership to release the mutex
-        let mut db = {
-            let mut db_guard = state_clone.db.lock().map_err(|_| AppError::LockPoisoned)?;
-            if db_guard.is_none() {
-                let db = Db::open(&db_path_clone)
-                    .map_err(|e| AppError::LibraryError(e.to_string()))?;
-                *db_guard = Some(db);
-            }
-            db_guard.take().ok_or(AppError::LibraryNotInitialized)?
-        };
-
-        // Mark as scanning so other commands fail fast instead of blocking
-        {
-            let mut guard = state_clone.is_scanning.lock().map_err(|_| AppError::LockPoisoned)?;
-            *guard = true;
-        }
-
-        // Supported image extensions for scanning
-        let extensions: &[&str] = &[
-            "jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "gif",
-            "tga", "dds", "jxl", "exr", // Formats requiring transcoding
-            "rw2", "arw", "nef", "cr2", "cr3", "dng", "orf", "raf" // RAW formats
-        ];
-
-        let stats = run_full_pipeline_with_mft(
-            Path::new(&folder_path_clone),
-            &mut db,
-            extensions,
-            1000,
-            use_mft
-        );
-
-        // Clear scanning flag and put DB back
-        {
-            let mut guard = state_clone.is_scanning.lock().map_err(|_| AppError::LockPoisoned)?;
-            *guard = false;
-        }
-        {
-            let mut db_guard = state_clone.db.lock().map_err(|_| AppError::LockPoisoned)?;
-            *db_guard = Some(db);
-        }
-
-        match stats {
-            Some(s) => Ok(s.processed as u32),
-            None => Ok(0u32),
-        }
+#[tauri::command]
+pub async fn library_remove_source(
+    state: State<'_, LibraryState>,
+    path: String,
+) -> Result<u32, AppError> {
+    state.with_db(|db| {
+        let count = db
+            .mark_source_deleted(&path)
+            .map_err(|e| AppError::LibraryError(e.to_string()))?;
+        Ok(count as u32)
     })
-    .await
-    .map_err(|e| AppError::Tauri(format!("Task join error: {}", e)))??;
-
-    Ok(result)
 }
 
 /// Get images in a folder
@@ -269,8 +240,8 @@ pub async fn library_get_images(
             .map(|f| f.folder_path)
             .unwrap_or_default();
 
-        // Use the new list_images API for better performance and filtering
-        let image_refs = db.list_images(folder_hash_num, offset, limit);
+        // Use the new list_images API with sort key for better performance and filtering
+        let image_refs = db.list_images(folder_hash_num, offset, limit, &SortKey::TimeDesc);
 
         let entries: Vec<ImageEntry> = image_refs
             .into_iter()
@@ -311,54 +282,36 @@ pub async fn library_get_all_images(
     limit: usize,
 ) -> Result<Vec<FlatImageEntry>, AppError> {
     state.with_db(|db| {
-        // Get all folders
-        let folders = db.list_folders();
-        let mut all_images: Vec<FlatImageEntry> = Vec::new();
-        let mut current_offset = 0usize;
-        let mut remaining_limit = limit;
+        // Use the efficient list_all_images API that handles pagination in a single pass
+        let images = db.list_all_images(offset, limit, true); // sort_desc = true (newest first)
 
-        for folder_summary in folders {
-            if remaining_limit == 0 {
-                break;
-            }
+        // Get folder info for each image (folder_cache is already populated by list_all_images)
+        let mut all_images: Vec<FlatImageEntry> = Vec::with_capacity(images.len());
 
-            let folder_hash = folder_summary.folder_hash;
-            let folder_path = folder_summary.folder_path.clone();
+        for img in images {
+            // Get folder path and name from folder hash
+            let folder_path = db
+                .get_folder_data(img.folder_hash)
+                .map_err(|e| AppError::LibraryError(e.to_string()))?
+                .map(|f| f.folder_path)
+                .unwrap_or_default();
             let folder_name = folder_path
                 .split(&['/', '\\'])
                 .last()
                 .unwrap_or("Unknown")
                 .to_string();
 
-            // Get images from this folder
-            let folder_images = db.list_images(folder_hash, 0, folder_summary.image_count as usize);
-
-            for img in folder_images {
-                // Skip images until we reach the offset
-                if current_offset < offset {
-                    current_offset += 1;
-                    continue;
-                }
-
-                if remaining_limit == 0 {
-                    break;
-                }
-
-                all_images.push(FlatImageEntry {
-                    id: img.image_id.to_string(),
-                    filename: img.file_name,
-                    folder_path: folder_path.clone(),
-                    folder_name: folder_name.clone(),
-                    folder_hash: folder_hash.to_string(),
-                    width: img.width,
-                    height: img.height,
-                    timestamp: img.timestamp,
-                    has_large: img.has_large,
-                });
-
-                remaining_limit -= 1;
-                current_offset += 1;
-            }
+            all_images.push(FlatImageEntry {
+                id: img.image_id.to_string(),
+                filename: img.file_name,
+                folder_path,
+                folder_name,
+                folder_hash: img.folder_hash.to_string(),
+                width: img.width,
+                height: img.height,
+                timestamp: img.timestamp,
+                has_large: img.has_large,
+            });
         }
 
         Ok(all_images)
@@ -385,7 +338,7 @@ pub async fn library_read_thumbnail(
     state.with_db(|db| {
         let id = image_id
             .parse::<u128>()
-            .map_err(|_| AppError::InvalidParameter("image_id".to_string()))?;
+            .map_err(|_| AppError::InvalidParameter(String::from("image_id")))?;
 
         let data = db
             .read_thumb_small(id)
@@ -395,30 +348,61 @@ pub async fn library_read_thumbnail(
     })
 }
 
+#[tauri::command]
+pub async fn library_read_thumbnails_batch(
+    state: State<'_, LibraryState>,
+    image_ids: Vec<String>,
+) -> Result<HashMap<String, Vec<u8>>, AppError> {
+    state.with_db(|db| {
+        let mut results = HashMap::with_capacity(image_ids.len());
+
+        for image_id in image_ids {
+            if let Ok(id) = image_id.parse::<u128>() {
+                // 尝试从数据库读取缩略图
+                if let Ok(Some(data)) = db.read_thumb_small(id) {
+                    results.insert(image_id, data);
+                }
+            }
+        }
+
+        Ok(results)
+    })
+}
+
+/// Preview data with original image dimensions
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewData {
+    pub data: Vec<u8>,
+    pub orig_width: u32,
+    pub orig_height: u32,
+}
+
 /// Read large preview
 #[tauri::command]
 pub async fn library_read_preview(
     state: State<'_, LibraryState>,
     image_id: String,
-) -> Result<Option<Vec<u8>>, AppError> {
+) -> Result<Option<PreviewData>, AppError> {
     state.with_db(|db| {
         let id = image_id
             .parse::<u128>()
-            .map_err(|_| AppError::InvalidParameter("image_id".to_string()))?;
+            .map_err(|_| AppError::InvalidParameter(String::from("image_id")))?;
 
-        let data = db
-            .read_preview(id)
+        let result = db
+            .read_preview_with_dims(id)
             .map_err(|e| AppError::LibraryError(e.to_string()))?;
 
-        Ok(data)
+        Ok(result.map(|(data, orig_width, orig_height)| PreviewData {
+            data,
+            orig_width,
+            orig_height,
+        }))
     })
 }
 
 /// Get library statistics
 #[tauri::command]
-pub async fn library_get_stats(
-    state: State<'_, LibraryState>,
-) -> Result<LibraryStats, AppError> {
+pub async fn library_get_stats(state: State<'_, LibraryState>) -> Result<LibraryStats, AppError> {
     state.with_db(|db| {
         let stats = db.stats();
         Ok(LibraryStats {
@@ -468,7 +452,7 @@ pub async fn library_mark_deleted(
     state.with_db(|db| {
         let id = image_id
             .parse::<u128>()
-            .map_err(|_| AppError::InvalidParameter("image_id".to_string()))?;
+            .map_err(|_| AppError::InvalidParameter(String::from("image_id")))?;
 
         db.mark_deleted(id)
             .map_err(|e| AppError::LibraryError(e.to_string()))
@@ -484,7 +468,7 @@ pub async fn library_get_image_path(
     state.with_db(|db| {
         let id = image_id
             .parse::<u128>()
-            .map_err(|_| AppError::InvalidParameter("image_id".to_string()))?;
+            .map_err(|_| AppError::InvalidParameter(String::from("image_id")))?;
 
         let path = db
             .get_absolute_path(id)

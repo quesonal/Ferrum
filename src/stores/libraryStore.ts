@@ -1,7 +1,8 @@
 import {defineStore} from 'pinia';
-import {computed, markRaw, ref, shallowReactive, shallowRef} from 'vue';
+import {computed, markRaw, reactive, ref, shallowReactive, shallowRef} from 'vue';
 import {invoke} from '@tauri-apps/api/core';
 import type {FolderNode} from '../types/folderNode';
+import {listen} from "@tauri-apps/api/event";
 
 export interface GroupedFolder {
   hash: string;
@@ -72,8 +73,13 @@ export const useLibraryStore = defineStore('library', () => {
   const visibleTreeNodes = shallowRef<FlatTreeNode[]>([]);
 
   const imagesByFolder = shallowReactive(new Map<string, FlatImageEntry[]>());
-  const expandedNodes = ref<Set<string>>(new Set());
+  const expandedNodes = reactive<Set<string>>(new Set());
   const thumbnailCache = shallowReactive(new Map<string, string>());
+
+  // Track loadFolderImages request versions to discard stale responses
+  const loadVersions = new Map<string, number>();
+  // Track in-flight requests to avoid duplicate concurrent fetches
+  const pendingRequests = new Set<string>();
 
   let folderTreeLoadingPromise: Promise<void> | null = null;
   const isLoading = ref(false);
@@ -104,7 +110,7 @@ export const useLibraryStore = defineStore('library', () => {
     while (stack.length > 0) {
       const {node, level} = stack.pop()!;
       const hasChildren = node.children && node.children.length > 0;
-      const isExpanded = expandedNodes.value.has(node.path);
+      const isExpanded = expandedNodes.has(node.path);
 
       flatList.push({node, level, isExpanded, hasChildren});
 
@@ -221,7 +227,7 @@ export const useLibraryStore = defineStore('library', () => {
       try {
         const tree = await invoke<FolderNode[]>('library_get_folder_tree');
         folderTree.value = markRaw(sortFolderTree(tree));
-        if (expandedNodes.value.size === 0) {
+        if (expandedNodes.size === 0) {
           expandAllNodes(folderTree.value);
         } else {
           updateVisibleTree(); // 数据加载完后初始化视图树
@@ -245,26 +251,45 @@ export const useLibraryStore = defineStore('library', () => {
     return sorted;
   }
 
+  async function update_folder_data() {
+    await Promise.all([
+      loadFolders(),
+      loadFolderTree()
+    ]);
+
+    // 2. 如果当前正在看扫描中的文件夹，增量拉取新图片
+    if (currentFolderId.value) {
+      await loadFolderImages(currentFolderId.value, true);
+    }
+    // Flat view: no cache clearing needed. The visibleRenderItems computed
+    // already detects stale data per-block (loadedImages.length < block.imageCount
+    // for updated folders, !loadedImages for new folders) and triggers reloads.
+    // Clearing imagesByFolder caused every block to flash empty simultaneously
+    // and raced with in-flight loadFolderImages requests.
+  }
+
+  listen('library-db-updated', async () => {
+    await update_folder_data()
+  });
+
+  // 监听增量更新
+  listen('library-db-incremental-update', async () => {
+    await update_folder_data()
+  });
+
+  listen('library-scan-progress', (event) => {
+    const [current, total] = event.payload as [number, number];
+    scanProgress.value = { current, total };
+  });
+
   async function scanFolder(folderPath: string, recursive = true, scanMode = 'auto') {
+    isLoading.value = true;
     try {
-      isLoading.value = true;
-      scanProgress.value = {current: 0, total: 0};
-
-      const count = await invoke<number>('library_scan_folder', {
-        request: {folder_path: folderPath, recursive, scan_mode: scanMode} as ScanRequest
-      });
-
-      // Refresh folders and tree after scan
-      await loadFolders();
+      await invoke('library_scan_folder', { request: {folder_path: folderPath, recursive, scan_mode: scanMode} as ScanRequest });
+      // 最终扫描完成后的刷新
       await loadFolderTree();
-
-      return count;
-    } catch (e) {
-      console.error('Failed to scan folder:', e);
-      return 0;
     } finally {
       isLoading.value = false;
-      scanProgress.value = null;
     }
   }
 
@@ -331,14 +356,37 @@ export const useLibraryStore = defineStore('library', () => {
    * Load images for a specific folder and prepend to flatImages
    * This ensures the folder's images are visible immediately when clicking on it
    */
-  async function loadFolderImages(folderHash: string): Promise<boolean> {
-    if (imagesByFolder.has(folderHash)) return true;
+  async function loadFolderImages(folderHash: string, force = false): Promise<boolean> {
+    // 如果不是强制更新且已有数据，则跳过
+    if (!force && imagesByFolder.has(folderHash)) {
+      return true;
+    }
+
+    // Skip if there's already an in-flight request for this folder
+    if (pendingRequests.has(folderHash)) {
+      return true;
+    }
+
+    // Bump version to track this request, discard stale responses
+    const version = (loadVersions.get(folderHash) ?? 0) + 1;
+    loadVersions.set(folderHash, version);
+    pendingRequests.add(folderHash);
+
     try {
-      const newImages = await invoke<FlatImageEntry[]>('library_get_images', {folderHash, offset: 0, limit: 50000});
+      const newImages = await invoke<FlatImageEntry[]>('library_get_images', {
+        folderHash, offset: 0, limit: 50000
+      });
+      // Only apply if this is still the latest request for this folder
+      if (loadVersions.get(folderHash) !== version) {
+        return true;
+      }
       imagesByFolder.set(folderHash, markRaw(newImages));
       return true;
     } catch (e) {
+      console.error('loadFolderImages failed:', folderHash, e);
       return false;
+    } finally {
+      pendingRequests.delete(folderHash);
     }
   }
 
@@ -350,18 +398,79 @@ export const useLibraryStore = defineStore('library', () => {
     }
   }
 
+  async function removeLibrarySource(folderPath: string) {
+    isLoading.value = true;
+    try {
+      // 1. 调用后端标记删除数据库记录
+      await invoke('library_remove_source', { path: folderPath });
+
+      // 2. 刷新本地元数据
+      await Promise.all([
+        loadFolders(),
+        loadFolderTree()
+      ]);
+
+      // 3. 如果当前正在看这个路径下的图片，清空视图缓存
+      // 这里可以简单地清空 imagesByFolder 里的对应键值
+      for (const [hash, _] of imagesByFolder.entries()) {
+        // 由于我们拿不到 hash 对应的 path，简单起见可以直接清空所有图片缓存
+        // 这样 Grid 重新滚动时会重新拉取剩下文件夹的 ID
+        imagesByFolder.delete(hash);
+      }
+
+      console.log(`Source removed: ${folderPath}`);
+    } catch (e) {
+      console.error('Failed to remove source:', e);
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  const MAX_CACHE_SIZE = 3000;
+
   async function getThumbnail(imageId: string): Promise<string | null> {
     if (thumbnailCache.has(imageId)) return thumbnailCache.get(imageId)!;
+
     try {
       const data = await invoke<number[] | null>('library_read_thumbnail', {imageId});
       if (data && data.length > 0) {
+        // 内存管理：检查容量
+        if (thumbnailCache.size >= MAX_CACHE_SIZE) {
+          const firstKey = thumbnailCache.keys().next().value;
+          const oldUrl = thumbnailCache.get(firstKey!);
+          if (oldUrl) URL.revokeObjectURL(oldUrl);
+          thumbnailCache.delete(firstKey!);
+        }
+
         const url = URL.createObjectURL(new Blob([new Uint8Array(data)], {type: 'image/webp'}));
         thumbnailCache.set(imageId, url);
         return url;
       }
-    } catch (e) {
-    }
+    } catch (e) {}
     return null;
+  }
+
+  async function getThumbnailsBatch(imageIds: string[]) {
+    // 过滤掉已经缓存过的
+    const missingIds = imageIds.filter(id => !thumbnailCache.has(id));
+    if (missingIds.length === 0) return;
+
+    try {
+      // 调用 Rust 批量接口 (一次性获取所有二进制数据)
+      const results = await invoke<Record<string, number[]>>('library_read_thumbnails_batch', {
+        imageIds: missingIds
+      });
+
+      // 批量转换为 Blob URL 并存入缓存
+      Object.entries(results).forEach(([id, data]) => {
+        if (data && data.length > 0) {
+          const url = URL.createObjectURL(new Blob([new Uint8Array(data)], { type: 'image/webp' }));
+          thumbnailCache.set(id, url);
+        }
+      });
+    } catch (e) {
+      console.error('Batch thumbnail load failed:', e);
+    }
   }
 
   // function addToCache(imageId: string, url: string) {
@@ -388,21 +497,21 @@ export const useLibraryStore = defineStore('library', () => {
 
   // Tree node expansion state management
   function isNodeExpanded(path: string): boolean {
-    return expandedNodes.value.has(path);
+    return expandedNodes.has(path);
   }
 
   function toggleNodeExpanded(path: string) {
-    if (expandedNodes.value.has(path)) expandedNodes.value.delete(path);
-    else expandedNodes.value.add(path);
+    if (expandedNodes.has(path)) expandedNodes.delete(path);
+    else expandedNodes.add(path);
     updateVisibleTree(); // 重算打平数组
   }
 
   function expandNode(path: string): void {
-    expandedNodes.value.add(path);
+    expandedNodes.add(path);
   }
 
   function collapseNode(path: string): void {
-    expandedNodes.value.delete(path);
+    expandedNodes.delete(path);
   }
 
   // Recursively expand all nodes in the tree
@@ -410,7 +519,7 @@ export const useLibraryStore = defineStore('library', () => {
     const traverse = (nList: FolderNode[]) => {
       for (const n of nList) {
         if (n.children && n.children.length > 0) {
-          expandedNodes.value.add(n.path);
+          expandedNodes.add(n.path);
           traverse(n.children);
         }
       }
@@ -421,7 +530,7 @@ export const useLibraryStore = defineStore('library', () => {
 
   // Clear all expanded state
   function clearExpandedNodes(): void {
-    expandedNodes.value.clear();
+    expandedNodes.clear();
   }
 
   function selectImage(imageId: string) {
@@ -518,6 +627,7 @@ export const useLibraryStore = defineStore('library', () => {
     loadFolderImages,
     loadStats,
     getThumbnail,
+    getThumbnailsBatch,
     // clearCache,
     selectImage,
     nextImage,
@@ -532,6 +642,7 @@ export const useLibraryStore = defineStore('library', () => {
     expandAllNodes,
     clearExpandedNodes,
     updateVisibleTree,
+    removeLibrarySource,
   };
 });
 

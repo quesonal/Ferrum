@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import {onMounted, ref} from 'vue';
+import {onMounted, ref, watch} from 'vue';
 import {useLibraryStore} from '../stores/libraryStore';
 import FolderTree from './FolderTree.vue';
+import type { FolderNode } from '../types/folderNode';
+
+const props = defineProps<{
+  activeFolderHash?: string | null;
+}>();
 
 const emit = defineEmits<{
   select: [folderId: string];
@@ -83,6 +88,32 @@ function startResize(e: MouseEvent) {
   document.addEventListener('mousemove', onMouseMove);
   document.addEventListener('mouseup', onMouseUp);
 }
+
+watch(() => props.activeFolderHash, (hash) => {
+  if (!hash) return;
+
+  // 查找算法：在树形结构中递归寻找匹配 folderHash 的节点，并返回其 path
+  const findPathByHash = (nodes: FolderNode[]): string | null => {
+    for (const node of nodes) {
+      if (node.folderHash === hash) {
+        return node.path;
+      }
+      if (node.children && node.children.length > 0) {
+        const foundPath = findPathByHash(node.children);
+        if (foundPath) return foundPath;
+      }
+    }
+    return null;
+  };
+
+  const path = findPathByHash(store.folderTree);
+  if (path) {
+    selectedPath.value = path; // 更新本地变量，从而触发 FolderTree 的高亮
+
+    // 可选：如果文件夹层级很深且被折叠了，你可能还需要调用 store 的展开逻辑
+    // store.expandToPath(path);
+  }
+}, { immediate: true });
 </script>
 
 <template>
@@ -105,7 +136,7 @@ function startResize(e: MouseEvent) {
 
     <div v-if="store.stats" class="sidebar-footer">
       <div class="stats">
-        <span>{{ formatNumber(store.stats.total_images) }} images</span>
+        <span>{{ formatNumber(store.stats.valid_images) }} images</span>
         <span>{{ store.stats.folder_count }} folders</span>
       </div>
     </div>

@@ -30,17 +30,28 @@ pub fn get_pending_file(state: State<'_, PendingFile>) -> Option<String> {
 fn scan_images_in_dir(dir: &Path) -> AppResult<Vec<String>> {
     let entries = std::fs::read_dir(dir)?;
     let mut images = Vec::new();
+    let mut errors = Vec::new();
 
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                // 使用 formats 模块的 O(1) 检查
-                if formats::is_supported(ext) {
-                    images.push(p.to_string_lossy().to_string());
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                        if formats::is_supported(ext) {
+                            images.push(p.to_string_lossy().to_string());
+                        }
+                    }
                 }
             }
+            Err(e) => {
+                errors.push(e);
+            }
         }
+    }
+
+    if !errors.is_empty() {
+        eprintln!("[Warning] scan_images_in_dir: {} entries skipped due to errors", errors.len());
     }
 
     images.sort_by(|a, b| alphanumeric_sort::compare_path(a, b));

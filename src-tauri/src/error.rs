@@ -36,7 +36,7 @@ pub enum AppError {
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
 
-    #[error(transparent)]
+    #[error("Operation failed: {0}")]
     Anyhow(#[from] anyhow::Error),
 }
 

@@ -1,5 +1,5 @@
 import {defineStore} from 'pinia';
-import {computed, ref} from 'vue';
+import {computed, ref, watch} from 'vue';
 import {convertFileSrc, invoke} from '@tauri-apps/api/core';
 
 interface ImageSupport {
@@ -11,12 +11,17 @@ interface ImageSupport {
 
 export const useImageStore = defineStore('image', () => {
   const currentPath = ref<string | null>(null);
+  const currentImageId = ref<string | null>(null);
   const fileList = ref<string[]>([]);
   const lastDir = ref<string | null>(null);
+  const previewSrc = ref<string | null>(null);
+  const previewOrigWidth = ref(0);
+  const previewOrigHeight = ref(0);
+  let lastPreviewUrl: string | null = null;
 
   const currentSrc = computed(() => {
     if (!currentPath.value) return '';
-    return convertFileSrc(currentPath.value, 'img');
+    return getImageSrc(currentPath.value);
   });
 
   const currentIndex = computed(() => {
@@ -30,6 +35,11 @@ export const useImageStore = defineStore('image', () => {
   };
 
   async function loadFile(path: string) {
+    // 仅文件系统打开时清预览（无 imageId）；library 场景 currentImageId 已设，预览由 watch 管理
+    if (!currentImageId.value) {
+      clearPreview();
+    }
+
     // 1. 立即更新当前路径，触发 ImageViewer 开始请求图片
     currentPath.value = path;
 
@@ -45,6 +55,8 @@ export const useImageStore = defineStore('image', () => {
   }
 
   async function loadFolder(dirPath: string) {
+    clearPreview();
+
     // 1. 更新最后访问的文件夹
     lastDir.value = dirPath;
 
@@ -71,39 +83,44 @@ export const useImageStore = defineStore('image', () => {
     }
   }
 
-  function nextImage() {
+  function nextImage(imageId?: string) {
     if (fileList.value.length === 0 || currentIndex.value === -1) return;
     const nextIdx = (currentIndex.value + 1) % fileList.value.length;
+    currentImageId.value = imageId ?? null;
     currentPath.value = fileList.value[nextIdx];
   }
 
-  function prevImage() {
+  function prevImage(imageId?: string) {
     if (fileList.value.length === 0 || currentIndex.value === -1) return;
-    // 处理负数索引
     const prevIdx = (currentIndex.value - 1 + fileList.value.length) % fileList.value.length;
+    currentImageId.value = imageId ?? null;
     currentPath.value = fileList.value[prevIdx];
   }
 
-  function firstImage() {
+  function firstImage(imageId?: string) {
     if (fileList.value.length === 0 || currentIndex.value === -1) return;
+    currentImageId.value = imageId ?? null;
     currentPath.value = fileList.value[0];
   }
 
-  function lastImage() {
+  function lastImage(imageId?: string) {
     if (fileList.value.length === 0 || currentIndex.value === -1) return;
+    currentImageId.value = imageId ?? null;
     currentPath.value = fileList.value[fileList.value.length - 1];
   }
 
-  function forward10() {
+  function forward10(imageId?: string) {
     if (fileList.value.length === 0 || currentIndex.value === -1) return;
-    const nextIdx = currentIndex.value + 10 < fileList.value.length ? currentIndex.value + 10 : fileList.value.length;
-    currentPath.value = fileList.value[nextIdx]
+    const nextIdx = currentIndex.value + 10 < fileList.value.length ? currentIndex.value + 10 : fileList.value.length - 1;
+    currentImageId.value = imageId ?? null;
+    currentPath.value = fileList.value[nextIdx];
   }
 
-  function backward10() {
+  function backward10(imageId?: string) {
     if (fileList.value.length === 0 || currentIndex.value === -1) return;
     const nextIdx = currentIndex.value - 10 > 0 ? currentIndex.value - 10 : 0;
-    currentPath.value = fileList.value[nextIdx]
+    currentImageId.value = imageId ?? null;
+    currentPath.value = fileList.value[nextIdx];
   }
 
   const FORMATS_CACHE_KEY = 'ferrum:formats';
@@ -153,14 +170,78 @@ export const useImageStore = defineStore('image', () => {
     return formats.value.all.includes(ext);
   }
 
+  // 根据扩展名选择协议：原生格式用 asset://（系统直读），需转码格式用 img://（自定义协议转 WebP）
+  function getImageSrc(path: string): string {
+    const normalized = path.replace(/\\/g, '/');
+    const ext = path.split('.').pop()?.toLowerCase() || '';
+    if (formats.value.native.includes(ext)) {
+      return convertFileSrc(normalized);
+    }
+    return convertFileSrc(normalized, 'img');
+  }
+
+  // 从 index_vault 数据库加载预览图（WebP，已转码，秒出）
+  async function loadPreview(imageId: string): Promise<boolean> {
+    try {
+      const result = await invoke<{ data: number[]; orig_width: number; orig_height: number } | null>(
+        'library_read_preview', { imageId }
+      );
+      if (currentImageId.value !== imageId) return false;
+      if (result && result.data && result.data.length > 0) {
+        const newUrl = URL.createObjectURL(
+          new Blob([new Uint8Array(result.data)], { type: 'image/webp' })
+        );
+        // 始终让新 preview 先就位，再废弃旧的。
+        // 废弃操作不 await：即使在导航频繁的场景下，
+        // 旧 blob 也会在 GC 时被回收，不需要同步回收造成白屏。
+        const oldUrl = lastPreviewUrl;
+        previewSrc.value = newUrl;
+        lastPreviewUrl = newUrl;
+        previewOrigWidth.value = result.orig_width;
+        previewOrigHeight.value = result.orig_height;
+        if (oldUrl) URL.revokeObjectURL(oldUrl);
+        return true;
+      }
+    } catch (e) {
+      console.error('Failed to load preview:', e);
+    }
+    return false;
+  }
+
+  function clearPreview() {
+    previewSrc.value = null;
+    previewOrigWidth.value = 0;
+    previewOrigHeight.value = 0;
+    if (lastPreviewUrl) {
+      URL.revokeObjectURL(lastPreviewUrl);
+      lastPreviewUrl = null;
+    }
+  }
+
+  // currentImageId 变化说明在看另一张图，加载新预览
+  // 只在这里清 preview，不要在 watch(currentPath) 里清
+  watch(currentImageId, async (newId) => {
+    clearPreview();
+    if (newId) {
+      await loadPreview(newId);
+    }
+  });
+
   return {
     formats,
     initFormats,
     isSupported,
+    getImageSrc,
     currentPath,
+    currentImageId,
     currentSrc,
+    previewSrc,
+    previewOrigWidth,
+    previewOrigHeight,
     loadFile,
     loadFolder,
+    loadPreview,
+    clearPreview,
     nextImage,
     prevImage,
     fileList,

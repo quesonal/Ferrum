@@ -1,20 +1,56 @@
 /* src/style.css */
 :root {
-    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    /* 这里的默认值必须和你的主题默认值完全一致 */
+    --dynamic-bg: #f3f3f3;
+    --dynamic-border: rgba(0, 0, 0, 0.1);
+    font-family: 'Segoe UI', 'Segoe UI Variable', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
 
-/* 彻底清除 html 和 body 的默认边距，并禁止滚动 */
 html, body, #app {
     margin: 0;
     padding: 0;
     width: 100%;
     height: 100%;
-    overflow: hidden; /* 核心：禁止最外层滚动 */
     background-color: var(--ui-bg);
+    overflow: hidden;
+}
+
+/* 优化：#app 不要淡入，直接显示，只让骨架屏淡出 */
+#app {
+    opacity: 1;
+}
+
+#startup-skeleton {
+    position: fixed; top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    display: flex; flex-direction: column;
+    background: var(--dynamic-bg);
+    z-index: 9999;
+    pointer-events: none;
+    /* 缩短淡出时间，0.1s 足够，太长反而显得拖沓 */
+    transition: opacity 0.1s ease-out;
+}
+
+/* 像素级匹配 TitleBar */
+.sk-title {
+    height: 32px; /* 与 TitleBar.vue 的 h-8 一致 */
+    border-bottom: 1px solid var(--dynamic-border);
+    background: var(--dynamic-bg);
+}
+
+.sk-content { flex: 1; }
+
+/* 像素级匹配 ControlBar (只有在有图时才需要，冷启动默认为空) */
+.sk-bottom {
+    height: 48px; /* 与 ControlBar.vue 的 h-12 一致 */
+    border-top: 1px solid var(--dynamic-border);
+    background: var(--dynamic-bg);
+    /* 初始不显示底栏，防止空界面启动时多出一个底栏块 */
+    display: none;
 }
 
 /* 针对 Webkit (Tauri) 的滚动条隐藏 */

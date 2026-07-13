@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {onMounted, ref, watch} from 'vue';
 import {useLibraryStore} from '../stores/libraryStore';
+import {useTagStore} from '../stores/tagStore';
+import {useI18n} from 'vue-i18n';
 import FolderTree from './FolderTree.vue';
 import type { FolderNode } from '../types/folderNode';
 
@@ -10,9 +12,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [folderId: string];
+  'select-tag': [tagId: number];
 }>();
 
 const store = useLibraryStore();
+const tagStore = useTagStore();
+const {t} = useI18n();
 
 // 拖拽调整宽度
 const sidebarWidth = ref(220);
@@ -29,6 +34,15 @@ if (savedWidth) {
 onMounted(() => {
   store.loadFolderTree(); // 加载树形结构
   store.loadStats();
+  // Lazily fetch the tag vocabulary for the Tags sidebar row.
+  // Phase B1 already loads it when Settings → Tags is opened; if
+  // the user lands on /library first, this catch-up keeps the row
+  // populated without showing a Settings modal first.
+  if (tagStore.tags.length === 0) {
+    tagStore.loadAll().catch((e) => {
+      console.warn('[sidebar] tagStore.loadAll failed:', e);
+    });
+  }
 });
 
 // 当前选中的路径（用于树形视图）
@@ -40,6 +54,17 @@ function handleTreeSelect(folderHash: string | null, path: string) {
   if (folderHash) {
     emit('select', folderHash);
   }
+}
+
+// Tag row click. Re-click on the active tag clears the filter (no
+// second emit, no scroll) — the row is its own toggle.
+function handleTagClick(tagId: number) {
+  if (store.currentTagId === tagId) {
+    store.clearTagFilter();
+    emit('select', ''); // signal LibraryView to also clear folder highlight
+    return;
+  }
+  emit('select-tag', tagId);
 }
 
 function formatNumber(num: number): string {
@@ -130,14 +155,49 @@ watch(() => props.activeFolderHash, (hash) => {
       />
 
       <div v-if="store.folderTree.length === 0" class="empty-state">
-        <p>No folders scanned yet</p>
+        <p>{{ $t('library.noFolders') }}</p>
+      </div>
+
+      <!--
+        Tags section (Phase B3). Renders below the folder tree as
+        a peer list. Active tag → blue highlight identical to the
+        folder tree active style. Re-click clears the filter.
+      -->
+      <div v-if="tagStore.tags.length > 0" class="tags-section">
+        <div class="tags-section-title">{{ t('library.tagsSection.title') }}</div>
+        <div
+            v-for="tag in tagStore.tags"
+            :key="tag.id"
+            class="tag-row"
+            :class="{ active: store.currentTagId === tag.id }"
+            @click="handleTagClick(tag.id)"
+        >
+          <span
+              class="tag-dot"
+              :style="tag.color ? {backgroundColor: tag.color} : {}"
+              :class="{ 'tag-dot-default': !tag.color }"
+          ></span>
+          <span class="tag-name">#{{ tag.name }}</span>
+          <!--
+            image_count is fetched from `library_list_tags` via a
+            backend GROUP BY; `-1` is a sentinel that means "this
+            came from `library_get_image_tags`, no aggregation was
+            done" — render nothing in that case to avoid showing
+            a fake count next to a chip row.
+          -->
+          <span
+              v-if="tag.image_count >= 0"
+              class="tag-count"
+              :title="$t('library.tagsSection.imageCount', {count: tag.image_count})"
+          >{{ tag.image_count >= 10000 ? formatNumber(tag.image_count) : tag.image_count }}</span>
+        </div>
       </div>
     </div>
 
     <div v-if="store.stats" class="sidebar-footer">
       <div class="stats">
-        <span>{{ formatNumber(store.stats.valid_images) }} images</span>
-        <span>{{ store.stats.folder_count }} folders</span>
+        <span>{{ formatNumber(store.stats.valid_images) }} {{ $t('library.images') }}</span>
+        <span>{{ store.stats.folder_count }} {{ $t('library.folders') }}</span>
       </div>
     </div>
 
@@ -188,6 +248,8 @@ watch(() => props.activeFolderHash, (hash) => {
   padding: 8px;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .empty-state {
@@ -213,4 +275,81 @@ watch(() => props.activeFolderHash, (hash) => {
   color: var(--ui-text-dim);
 }
 
+.tags-section {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tags-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--ui-text-dim);
+  letter-spacing: 0.06em;
+  padding: 6px 8px 4px;
+}
+
+.tag-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ui-text);
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.1s;
+}
+
+.tag-row:hover {
+  background-color: var(--btn-hover);
+}
+
+.tag-row.active {
+  background-color: #2563eb; /* blue-600, matches FolderTree active row */
+  color: white;
+}
+
+.tag-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tag-dot-default {
+  background-color: var(--ui-text-dim);
+  opacity: 0.5;
+}
+
+.tag-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-dim);
+  /* Subtle pill so the number reads as a secondary metadata badge
+     rather than part of the tag name. */
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background-color: var(--btn-hover);
+  min-width: 18px;
+  text-align: center;
+}
+
+.tag-row.active .tag-count {
+  /* Lift the badge out of the blue background. */
+  background-color: rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.85);
+}
 </style>

@@ -1,173 +1,289 @@
 <script setup lang="ts">
-import {computed, ref, useTemplateRef, watch} from 'vue';
+import { computed, ref, useTemplateRef, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { usePanZoom } from '../composables/usePanZoom';
 import ThumbnailNavigator from './ThumbnailNavigator.vue';
+import { perfBegin, perfEnd, perfMark } from '../perf';
 
 const props = defineProps<{
   src: string;
   previewSrc?: string | null;
   previewOrigWidth?: number;
   previewOrigHeight?: number;
+  fastNavigating?: boolean;
+  sidebarVisible?: boolean;
+  isLibraryMode?: boolean;
 }>();
+
 const emit = defineEmits(['update:scale', 'load']);
 
-// --- 状态 ---
 const slotA = ref({ src: '', scale: 1, x: 0, y: 0 });
 const slotB = ref({ src: '', scale: 1, x: 0, y: 0 });
 const activeSlot = ref<'A' | 'B' | null>(null);
 
-// 跟踪当前想要显示的图片（防止快速连续按下一张时发生错乱）
 const pendingSrc = ref<string | null>(null);
+let pendingSrcTimeout: number | null = null;
+
+function startPendingTimeout() {
+  clearPendingTimeout();
+  pendingSrcTimeout = window.setTimeout(() => {
+    if (pendingSrc.value) pendingSrc.value = null;
+  }, 3000);
+}
+
+function clearPendingTimeout() {
+  if (pendingSrcTimeout !== null) {
+    clearTimeout(pendingSrcTimeout);
+    pendingSrcTimeout = null;
+  }
+}
 
 const viewportRef = useTemplateRef<HTMLElement>('viewportRef');
 const imgARef = useTemplateRef<HTMLImageElement>('imgARef');
 const imgBRef = useTemplateRef<HTMLImageElement>('imgBRef');
-
-const activeImgRef = computed(() => {
-  if (activeSlot.value === 'A') return imgARef.value;
-  if (activeSlot.value === 'B') return imgBRef.value;
-  return null;
-});
+const activeImgRef = computed(() => activeSlot.value === 'A' ? imgARef.value : (activeSlot.value === 'B' ? imgBRef.value : null));
 
 const {
-  scale, translate, setMinScale, fitToScreen, minScale,
-  onDrag, stopDrag, zoomIn, zoomOut, startDrag, handleWheel, getConstrainedTranslate
-} = usePanZoom({
-  viewportRef,
-  imgRef: activeImgRef
-});
+  scale, translate, setMinScale, fitToScreen,
+  onDrag, stopDrag, zoomIn, zoomOut, zoomAtPoint, startDrag, handleWheel, getConstrainedTranslate
+} = usePanZoom({ viewportRef, imgRef: activeImgRef });
 
-// --- 缩略图导航相关状态 ---
 const imageNaturalSize = ref({ width: 0, height: 0 });
 const viewportSize = ref({ width: 0, height: 0 });
 
-const showThumbnail = computed(() => {
-  return !!(props.src && imageNaturalSize.value.width > 0 && scale.value > minScale.value);
+const updateViewportSize = () => {
+  if (viewportRef.value) {
+    viewportSize.value = { width: viewportRef.value.clientWidth, height: viewportRef.value.clientHeight };
+  }
+};
+
+const hasValidPreview = computed(() => {
+  return !!(props.previewSrc && props.previewOrigWidth && props.previewOrigHeight);
+});
+
+// 将 缩略图图源 + 尺寸 + Scale 打包为一个原子状态，彻底杜绝数据撕裂
+const thumbnailResolvedState = computed(() => {
+  // 1. 快速长按翻页中：显示骨架屏，传安全值即可
+  if (props.fastNavigating) {
+    return {
+      src: '',
+      w: imageNaturalSize.value.width || 1,
+      h: imageNaturalSize.value.height || 1,
+      scale: scale.value,
+      x: translate.value.x,
+      y: translate.value.y
+    };
+  }
+
+  // 2. 切图等待解码期间（核心修复点）：
+  // 我们已经有了新图的预览数据，直接预测它即将被 fitToScreen 的理想 Scale。
+  // 这样传给子组件，子组件就会用全新的数据直接渲染，不会出现“旧框套新图”的跳变！
+  if (pendingSrc.value && hasValidPreview.value) {
+    const vpw = viewportSize.value.width || window.innerWidth;
+    const vph = viewportSize.value.height || window.innerHeight;
+    const predictedScale = Math.min(vpw / props.previewOrigWidth!, vph / props.previewOrigHeight!, 1);
+
+    return {
+      src: props.previewSrc!,
+      w: props.previewOrigWidth!,
+      h: props.previewOrigHeight!,
+      scale: predictedScale,
+      x: 0, // 新图加载完毕时必定居中
+      y: 0
+    };
+  }
+
+  // 3. 稳定状态（无图加载，或者文件系统模式无预览图）：回退到真实的槽位数据
+  const stableSrc = props.previewSrc
+      ? props.previewSrc
+      : (activeSlot.value === 'A' ? slotA.value.src : (activeSlot.value === 'B' ? slotB.value.src : props.src));
+
+  return {
+    src: stableSrc,
+    w: imageNaturalSize.value.width || 1,
+    h: imageNaturalSize.value.height || 1,
+    scale: scale.value,
+    x: translate.value.x,
+    y: translate.value.y
+  };
+});
+
+// 只要有可用的预测数据，就不进入 loading 避免闪烁骨架屏
+const isThumbnailLoading = computed(() => {
+  if (props.fastNavigating) return true;
+  if (hasValidPreview.value) return false;
+  return !!pendingSrc.value;
+});
+
+const isActiveSlotVisible = computed(() => {
+  if (hasValidPreview.value && (props.fastNavigating || pendingSrc.value)) {
+    return false;
+  }
+  return true;
 });
 
 const previewFitScale = computed(() => {
   if (!props.previewOrigWidth || !props.previewOrigHeight) return 1;
-  const vpw = viewportRef.value?.clientWidth ?? window.innerWidth;
-  const vph = viewportRef.value?.clientHeight ?? window.innerHeight;
+  const vpw = viewportSize.value.width || window.innerWidth;
+  const vph = viewportSize.value.height || window.innerHeight;
   if (!vpw || !vph) return 1;
   return Math.min(vpw / props.previewOrigWidth, vph / props.previewOrigHeight);
 });
-
-const updateViewportSize = () => {
-  if (viewportRef.value) {
-    viewportSize.value = {
-      width: viewportRef.value.clientWidth,
-      height: viewportRef.value.clientHeight
-    };
-  }
-};
 
 const handleThumbnailNavigate = (newTranslateX: number, newTranslateY: number) => {
   translate.value = getConstrainedTranslate(newTranslateX, newTranslateY, scale.value);
 };
 
+const handleThumbnailZoom = (direction: 'in' | 'out', thumbX: number, thumbY: number) => {
+  const MAX_THUMB_WIDTH = 200;
+  const MAX_THUMB_HEIGHT = 150;
+  // 使用同步后的统一尺寸状态，防止除0和缩放错乱
+  const natW = thumbnailResolvedState.value.w;
+  const natH = thumbnailResolvedState.value.h;
+  if (!natW || !natH) return;
+
+  const thumbScale = Math.min(MAX_THUMB_WIDTH / natW, MAX_THUMB_HEIGHT / natH, 1);
+  const naturalX = thumbX / thumbScale;
+  const naturalY = thumbY / thumbScale;
+
+  const viewportX = (naturalX - natW / 2) * scale.value + translate.value.x;
+  const viewportY = (naturalY - natH / 2) * scale.value + translate.value.y;
+
+  zoomAtPoint(direction, { x: viewportX, y: viewportY });
+};
+
 const calculateAndSetMinScale = (imgWidth: number, imgHeight: number) => {
   const vpw = viewportRef.value?.clientWidth ?? window.innerWidth;
   const vph = viewportRef.value?.clientHeight ?? window.innerHeight;
-  const fitScaleX = vpw / imgWidth;
-  const fitScaleY = vph / imgHeight;
-  const fitScale = Math.min(fitScaleX, fitScaleY);
+  const fitScale = Math.min(vpw / imgWidth, vph / imgHeight);
   const newMinScale = Math.min(fitScale, 1);
   setMinScale(newMinScale);
   return newMinScale;
 };
 
-// 监听外界传入的新图片地址
-watch(() => props.src, (newPath) => {
-  if (!newPath) {
-    pendingSrc.value = null;
-    return;
-  }
-
+function loadFullImage(newPath: string) {
+  perfMark('switch::viewer_src_changed', { slot_hint: activeSlot.value });
   const currentSlot = activeSlot.value;
   const currentSrc = currentSlot === 'A' ? slotA.value.src : (currentSlot === 'B' ? slotB.value.src : null);
 
   if (newPath === currentSrc) return;
 
-  // 1. 确定下一个槽位
   const nextSlotName = currentSlot === 'A' ? 'B' : 'A';
   const nextSlotState = nextSlotName === 'A' ? slotA : slotB;
   const nextImgRef = nextSlotName === 'A' ? imgARef : imgBRef;
 
-  // 2. 核心修复逻辑：
-  // 如果下一个槽位的 src 已经是我们要的地址，且图片已经加载完成（complete）
-  // 浏览器不会再次触发 @load，我们需要手动调用处理函数进行切换
   if (nextSlotState.value.src === newPath) {
     if (nextImgRef.value && nextImgRef.value.complete) {
+      perfMark('switch::reuse_slot', { slot: nextSlotName });
+      perfMark('fs_cycle::prefetch_hit', { slot: nextSlotName });
       applyImageToSlot(nextSlotName, nextImgRef.value);
+      return;
+    }
+    if (nextImgRef.value && !nextImgRef.value.complete) {
+      perfMark('switch::slot_in_flight', { slot: nextSlotName });
       return;
     }
   }
 
-  // 3. 正常赋值流程
   pendingSrc.value = newPath;
+  startPendingTimeout();
   nextSlotState.value.src = newPath;
+  perfMark('fs_cycle::slot_assigned', { slot: nextSlotName, cold: true });
+}
+
+watch([() => props.src, () => props.fastNavigating], ([newPath, isFast], oldValues) => {
+  const oldPath = oldValues ? oldValues[0] : undefined;
+  const oldFast = oldValues ? oldValues[1] : undefined;
+
+  if (!newPath) {
+    pendingSrc.value = null;
+    clearPendingTimeout();
+    return;
+  }
+
+  if (isFast && props.isLibraryMode) {
+    pendingSrc.value = null;
+    return;
+  }
+
+  if (newPath !== oldPath || (oldFast === true && !isFast)) {
+    loadFullImage(newPath);
+  }
 }, { immediate: true });
 
 const applyImageToSlot = (slotName: 'A' | 'B', imgEl: HTMLImageElement) => {
+  perfBegin('switch::apply_image_to_slot', { slot: slotName });
   const vpw = viewportRef.value?.clientWidth ?? window.innerWidth;
   const vph = viewportRef.value?.clientHeight ?? window.innerHeight;
 
-  imageNaturalSize.value = {
-    width: imgEl.naturalWidth,
-    height: imgEl.naturalHeight
-  };
+  imageNaturalSize.value = { width: imgEl.naturalWidth, height: imgEl.naturalHeight };
   updateViewportSize();
   calculateAndSetMinScale(imgEl.naturalWidth, imgEl.naturalHeight);
 
-  const sX = vpw / imgEl.naturalWidth;
-  const sY = vph / imgEl.naturalHeight;
-  const newScale = Math.min(sX, sY, 1);
-
+  const newScale = Math.min(vpw / imgEl.naturalWidth, vph / imgEl.naturalHeight, 1);
   const targetSlot = slotName === 'A' ? slotA : slotB;
+
   targetSlot.value.scale = newScale;
   targetSlot.value.x = 0;
   targetSlot.value.y = 0;
 
   activeSlot.value = slotName;
   pendingSrc.value = null;
+  clearPendingTimeout();
 
   scale.value = newScale;
   translate.value = { x: 0, y: 0 };
 
   emit('load');
   emit('update:scale', newScale);
+  perfEnd('switch::apply_image_to_slot');
+  perfMark('switch::visible', { slot: slotName });
+  perfMark('fs_cycle::visible', { slot: slotName, w: imgEl.naturalWidth, h: imgEl.naturalHeight });
 };
 
-// 真正完成加载的回调
 const handleImageLoad = async (slotName: 'A' | 'B', imgEl: HTMLImageElement) => {
-  const slotState = slotName === 'A' ? slotA.value : slotB.value;
-  // 如果在加载期间用户已经切到了别的图，直接废弃
-  if (pendingSrc.value && slotState.src !== pendingSrc.value) return;
+  const slotRef = slotName === 'A' ? slotA : slotB;
+  const intendedSrc = slotRef.value.src;
+
+  if (pendingSrc.value !== intendedSrc) return;
+
+  perfBegin('switch::handle_image_load', { slot: slotName });
+  perfMark('switch::decode_begin', { slot: slotName, w: imgEl.naturalWidth, h: imgEl.naturalHeight });
 
   try {
-    // 【核心修复】：强制浏览器在后台完成图像光栅化解码
-    // 这样切换时图片像素已经存在于 GPU/内存中，绝对不会闪烁
     await imgEl.decode();
   } catch (e) {
     console.warn('图片解码被中断或失败', e);
   }
 
-  // 解码可能耗时几十毫秒，需要再次确认用户是否已经切图
-  if (pendingSrc.value && slotState.src !== pendingSrc.value) return;
+  perfMark('switch::decode_end', { slot: slotName });
+
+  if (pendingSrc.value !== intendedSrc) {
+    perfEnd('switch::handle_image_load');
+    return;
+  }
+
+  if (props.fastNavigating && props.isLibraryMode) {
+    perfEnd('switch::handle_image_load');
+    return;
+  }
+
+  if (imgEl.naturalWidth === 0 || imgEl.naturalHeight === 0) {
+    perfEnd('switch::handle_image_load');
+    return;
+  }
 
   applyImageToSlot(slotName, imgEl);
+  perfEnd('switch::handle_image_load');
 };
 
-// 如果图片损坏或加载失败，清空 pending 锁防止卡死
 const handleImageError = (slotName: 'A' | 'B') => {
-  const slotState = slotName === 'A' ? slotA.value : slotB.value;
-  if (slotState.src === pendingSrc.value) {
+  const slotRef = slotName === 'A' ? slotA : slotB;
+  if (slotRef.value.src === pendingSrc.value) {
     pendingSrc.value = null;
+    clearPendingTimeout();
   }
 };
 
-// 将共享的 pan/zoom 状态同步到当前活跃 slot 的独立 transform
 watch([scale, translate], () => {
   if (activeSlot.value === 'A') {
     slotA.value.scale = scale.value;
@@ -187,12 +303,24 @@ defineExpose({
     if (img) fitToScreen(img);
   },
 });
+
+const isTeleportReady = ref(false);
+onMounted(() => {
+  updateViewportSize();
+  window.addEventListener('resize', updateViewportSize);
+  nextTick(() => {
+    isTeleportReady.value = true;
+  });
+});
+onUnmounted(() => {
+  window.removeEventListener('resize', updateViewportSize);
+});
 </script>
 
 <template>
   <div
       ref="viewportRef"
-      class="w-full h-full overflow-hidden relative flex justify-center items-center outline-none bg-transparent active:cursor-grabbing"
+      class="image-viewer-root w-full h-full overflow-hidden relative flex justify-center items-center outline-none bg-transparent active:cursor-grabbing"
       @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag" @mousedown="startDrag"
   >
     <!-- Slot A -->
@@ -200,13 +328,11 @@ defineExpose({
         v-if="slotA.src"
         ref="imgARef"
         :src="slotA.src"
-        :style="{
-      transform: `translate(${slotA.x}px, ${slotA.y}px) scale(${slotA.scale})`,
-    }"
+        :style="{ transform: `translate(${slotA.x}px, ${slotA.y}px) scale(${slotA.scale})` }"
         :class="[
-      'max-w-none max-h-none block shadow-2xl instant-img absolute transition-opacity duration-0',
-      activeSlot === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
-    ]"
+          'max-w-none max-h-none block shadow-2xl instant-img absolute',
+          (activeSlot === 'A' && isActiveSlotVisible) ? 'opacity-100 z-10 transition-none' : 'opacity-0 z-0 pointer-events-none transition-opacity duration-200 ease-out'
+        ]"
         draggable="false"
         decoding="async"
         @load="handleImageLoad('A', $event.target as HTMLImageElement)"
@@ -219,13 +345,11 @@ defineExpose({
         v-if="slotB.src"
         ref="imgBRef"
         :src="slotB.src"
-        :style="{
-      transform: `translate(${slotB.x}px, ${slotB.y}px) scale(${slotB.scale})`,
-    }"
+        :style="{ transform: `translate(${slotB.x}px, ${slotB.y}px) scale(${slotB.scale})` }"
         :class="[
-      'max-w-none max-h-none block shadow-2xl instant-img absolute transition-opacity duration-0',
-      activeSlot === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
-    ]"
+          'max-w-none max-h-none block shadow-2xl instant-img absolute',
+          (activeSlot === 'B' && isActiveSlotVisible) ? 'opacity-100 z-10 transition-none' : 'opacity-0 z-0 pointer-events-none transition-opacity duration-200 ease-out'
+        ]"
         draggable="false"
         decoding="async"
         @load="handleImageLoad('B', $event.target as HTMLImageElement)"
@@ -233,56 +357,58 @@ defineExpose({
         alt=""
     />
 
-    <!-- 预览图层：按原图比例渲染，与主图同一坐标空间；opacity 切换与主图同 compositor 层，避免背景闪现 -->
-    <img
-        v-if="previewSrc && previewOrigWidth && previewOrigHeight"
-        :src="previewSrc"
-        :width="previewOrigWidth"
-        :height="previewOrigHeight"
-        :style="{ transform: `translate(0px, 0px) scale(${previewFitScale})` }"
-        :class="[
-          'max-w-none max-h-none block absolute preview-img',
-          (!activeSlot || pendingSrc) ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        ]"
-        draggable="false"
-        alt="preview"
-    />
+    <Transition name="preview-fade">
+      <div
+          v-if="hasValidPreview && (!activeSlot || pendingSrc || fastNavigating)"
+          :key="previewSrc || 'empty'"
+          class="absolute inset-0 flex justify-center items-center pointer-events-none z-20"
+      >
+        <img
+            :src="previewSrc!"
+            :width="previewOrigWidth"
+            :height="previewOrigHeight"
+            :style="{ transform: `translate(0px, 0px) scale(${previewFitScale})` }"
+            class="max-w-none max-h-none block shadow-2xl preview-img pointer-events-none"
+            draggable="false"
+            alt="preview"
+        />
+      </div>
+    </Transition>
 
     <slot name="empty" v-if="!activeSlot"></slot>
 
-    <!-- 缩略图导航器 -->
-    <ThumbnailNavigator
-        :visible="showThumbnail"
-        :image-src="props.src"
-        :natural-width="imageNaturalSize.width"
-        :natural-height="imageNaturalSize.height"
-        :viewport-width="viewportSize.width"
-        :viewport-height="viewportSize.height"
-        :scale="scale"
-        :translate-x="translate.x"
-        :translate-y="translate.y"
-        @navigate="handleThumbnailNavigate"
-    />
+    <!-- 传入完全同步后的最新原子化状态数据 -->
+    <Teleport to="#thumbnail-teleport-target" v-if="isTeleportReady">
+      <ThumbnailNavigator
+          :key="src"
+          :is-loading="isThumbnailLoading"
+          :image-src="thumbnailResolvedState.src"
+          :natural-width="thumbnailResolvedState.w"
+          :natural-height="thumbnailResolvedState.h"
+          :viewport-width="viewportSize.width"
+          :viewport-height="viewportSize.height"
+          :scale="thumbnailResolvedState.scale"
+          :translate-x="thumbnailResolvedState.x"
+          :translate-y="thumbnailResolvedState.y"
+          @navigate="handleThumbnailNavigate"
+          @zoom="handleThumbnailZoom"
+      />
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
+.image-viewer-root {
+  contain: layout paint;
+}
+
 .preview-img {
   z-index: 5;
   background: transparent;
+  will-change: transform;
 }
 
 .instant-img {
-  will-change: transform;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: auto;
   backface-visibility: hidden;
-  -webkit-font-smoothing: antialiased;
-}
-
-@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
-  .instant-img {
-    image-rendering: auto;
-  }
 }
 </style>

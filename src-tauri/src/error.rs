@@ -38,6 +38,18 @@ pub enum AppError {
 
     #[error("Operation failed: {0}")]
     Anyhow(#[from] anyhow::Error),
+
+    #[error("Database error: {0}")]
+    Sqlx(#[from] sea_orm::DbErr),
+
+    #[error("Migration error: {0}")]
+    Migration(String),
+
+    #[error("Not initialized: {0}")]
+    NotInitialized(&'static str),
+
+    #[error("Already initialized: {0}")]
+    AlreadyInitialized(&'static str),
 }
 
 // 实现 Serialize 以便将错误返回给前端

@@ -5,9 +5,9 @@
 // }>();
 
 const emit = defineEmits<{
-  (e: 'prev'): void;
-  (e: 'next'): void;
-  (e: 'toggle-fit'): void;
+  prev: [];
+  next: [];
+  'toggle-fit': [];
 }>();
 </script>
 

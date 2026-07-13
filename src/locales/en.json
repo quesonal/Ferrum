@@ -1,0 +1,147 @@
+{
+  "app": {
+    "title": "Ferrum",
+    "toggleLibrary": "Toggle Library (L)",
+    "library": "📚 Library",
+    "clickToFit": "Click to fit"
+  },
+  "settings": {
+    "title": "Settings",
+    "tabs": {
+      "general": "General",
+      "mouse": "Mouse",
+      "tags": "Tags"
+    },
+    "theme": "Theme",
+    "dark": "Dark",
+    "light": "Light",
+    "language": "Language",
+    "canvasBackground": "Image Canvas Background",
+    "resetDefault": "Reset to default",
+
+    "showControlBar": "Show Bottom Control Bar",
+    "showHistogram": "Show Histogram & EXIF",
+    "confirmBeforeDelete": "Confirm before delete",
+    "confirmBeforeDeleteHint": "Off = Del / Shift+Del delete immediately without prompt",
+    "scanMode": "Scan Mode",
+    "scanModeOptions": {
+      "auto": "Auto (Everything → WalkDir)",
+      "everything": "Everything (Fastest, requires Everything)",
+      "mft": "MFT (Fast, requires admin)",
+      "walkdir": "WalkDir (Compatible)"
+    },
+    "scanModeDescriptions": {
+      "auto": "Automatically select the best available method",
+      "everything": "Requires VoidTools Everything to be installed and running",
+      "mft": "Requires administrator privileges on Windows",
+      "walkdir": "Standard filesystem scanning, works everywhere"
+    },
+    "librarySources": "Library Sources",
+    "addFolder": "Add Folder",
+    "noFolders": "No folders configured",
+    "rescan": "Rescan Folder",
+    "removeSource": "Remove Source",
+    "done": "Done",
+    "mouse": {
+      "buttons": "Mouse Buttons",
+      "wheel": "Mouse Wheel",
+      "leftClick": "Left Click",
+      "rightClick": "Right Click",
+      "middleClick": "Middle Click",
+      "sideButton1": "Side Button 1 (Back)",
+      "sideButton2": "Side Button 2 (Forward)",
+      "wheelUp": "Wheel Up",
+      "wheelDown": "Wheel Down"
+    },
+    "actions": {
+      "none": "None",
+      "fullScreen": "Full Screen",
+      "maximize": "Maximize",
+      "minimize": "Minimize",
+      "exit": "Exit",
+      "openFile": "Open File",
+      "openFolder": "Open Folder",
+      "nextImage": "Next Image",
+      "prevImage": "Previous Image",
+      "firstImage": "First Image",
+      "lastImage": "Last Image",
+      "forward10": "Forward 10 Images",
+      "backward10": "Backward 10 Images",
+      "zoomIn": "Zoom In",
+      "zoomOut": "Zoom Out",
+      "zoom": "Zoom",
+      "showExif": "Show EXIF",
+      "fitWindow": "Fit to Window"
+    },
+    "tags": {
+      "newTag": "New Tag",
+      "newTagPlaceholder": "Tag name",
+      "create": "Create",
+      "save": "Save",
+      "empty": "No tags yet",
+      "rename": "Rename",
+      "renamePrompt": "New name",
+      "delete": "Delete",
+      "deleteConfirmTitle": "Delete Tag",
+      "deleteConfirmMessage": "Delete tag \"{name}\"? Image associations will also be cleared."
+    }
+  },
+  "exif": {
+    "rgbHistogram": "RGB Histogram",
+    "title": "EXIF",
+    "dimensions": "Dimensions",
+    "size": "Size",
+    "type": "Type",
+    "camera": "Camera",
+    "lens": "Lens",
+    "iso": "ISO",
+    "aperture": "Aperture",
+    "shutter": "Shutter",
+    "focalLength": "Focal Length",
+    "date": "Date"
+  },
+  "library": {
+    "noFolders": "No folders scanned yet",
+    "images": "images",
+    "folders": "folders",
+    "tagsSection": {
+      "title": "Tags",
+      "imageCount": "{count} image | {count} images"
+    },
+    "tagFilter": {
+      "active": "Filtering by tag"
+    }
+  },
+  "delete": {
+    "trashTitle": "Move to Trash",
+    "trashMessage": "Move \"{name}\" to the Recycle Bin? You can restore it later.",
+    "trashConfirm": "Move to Trash",
+    "permanentTitle": "Delete Permanently",
+    "permanentMessage": "Permanently delete \"{name}\"? This cannot be undone.",
+    "permanentConfirm": "Delete Permanently"
+  },
+  "scrollbar": {
+    "scrollToTop": "Scroll to Top",
+    "scrollToBottom": "Scroll to Bottom"
+  },
+  "imageView": {
+    "tags": {
+      "addTag": "Add Tag",
+      "noTags": "No tags",
+      "remove": "Remove",
+      "title": "Tags"
+    }
+  },
+  "tagPicker": {
+    "title": "Tags",
+    "searchPlaceholder": "Search or create...",
+    "createNew": "Create \"{name}\"",
+    "noMatches": "No matches",
+    "selectedCount": "{n} selected",
+    "cancel": "Cancel",
+    "apply": "Apply"
+  },
+  "metaBackfill": {
+    "indexing": "Indexing {processed} / {total}"
+  }
+}

@@ -7,24 +7,31 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "flamegraph:dev": "npm run tauri dev -- -- --features flamegraph -- --profile-output ./flamegraph/flamegraph.json",
+    "flamegraph:build": "npm run tauri build -- -- --features flamegraph",
+    "flamegraph:run": "./src-tauri/target/release/ferrum.exe --profile-output ./flamegraph-release.json",
+    "flamegraph:open": "start https://ui.perfetto.dev"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-log": "^2.8.0",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-window-state": "^2.4.1",
     "pinia": "^3.0.4",
-    "vue": "^3.5.13"
+    "vue": "^3.5.39",
+    "vue-i18n": "^11.4.6",
+    "vue-router": "^5.1.0"
   },
   "devDependencies": {
     "@iconify-json/mdi": "^1.2.3",
     "@tauri-apps/cli": "^2",
-    "@vitejs/plugin-vue": "^5.2.1",
-    "typescript": "~5.6.2",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "esbuild": "^0.28.1",
+    "typescript": "~5.6.3",
     "unocss": "^66.6.0",
-    "vite": "^6.0.3",
-    "vue-tsc": "^2.1.10"
+    "vite": "^8.1.4",
+    "vue-tsc": "^3.3.7"
   }
 }

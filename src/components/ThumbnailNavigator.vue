@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, onBeforeUnmount } from 'vue';
+import {computed, ref, onBeforeUnmount, watch, onMounted} from 'vue';
 
 interface Props {
-  visible: boolean;
+  isLoading?: boolean;
   imageSrc: string;
   naturalWidth: number;
   naturalHeight: number;
@@ -13,24 +13,23 @@ interface Props {
   translateY: number;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), { isLoading: false });
 const emit = defineEmits<{
-  (e: 'navigate', x: number, y: number): void;
+  navigate: [x: number, y: number];
+  zoom: [direction: 'in' | 'out', thumbX: number, thumbY: number];
 }>();
 
-// 缩略图最大尺寸
+// 缩略图固定交互区域大小
 const MAX_THUMB_WIDTH = 200;
 const MAX_THUMB_HEIGHT = 150;
 
 // 拖动状态
 const isDragging = ref(false);
 const isAnimating = ref(false);
-const navigatorRef = ref<HTMLElement | null>(null);
-
 const dragStartPos = ref({ x: 0, y: 0 });
 const dragStartTranslate = ref({ x: 0, y: 0 });
 
-// 【核心新增】：本地临时坐标。拖拽时蓝框位置由它决定，不看父组件脸色
+// 本地临时坐标。拖拽时蓝框位置由它决定
 const targetTranslate = ref({ x: 0, y: 0 });
 const localTranslate = ref({ x: 0, y: 0 });
 let animationFrameId: number | null = null;
@@ -38,30 +37,25 @@ let animationFrameId: number | null = null;
 const clampTranslate = (tx: number, ty: number) => {
   const { naturalWidth, naturalHeight, viewportWidth, viewportHeight, scale } = props;
 
-  // 图片在屏幕上的实际显示尺寸
   const displayedWidth = naturalWidth * scale;
   const displayedHeight = naturalHeight * scale;
 
-  // 计算允许移动的最大偏移量
-  // 如果图片比视窗还小，则不允许移动（边界设为0）
   const maxTx = Math.max(0, (displayedWidth - viewportWidth) / 2);
   const maxTy = Math.max(0, (displayedHeight - viewportHeight) / 2);
 
-  // 限制 x 和 y 在 [-max, max] 范围内
   return {
     x: Math.max(-maxTx, Math.min(maxTx, tx)),
     y: Math.max(-maxTy, Math.min(maxTy, ty))
   };
 };
 
-// 当前生效的坐标（拖拽时用本地零延迟坐标，不拖拽时用父组件传来的真实坐标）
 const activeTranslate = computed(() => {
   return (isDragging.value || isAnimating.value)
       ? { x: localTranslate.value.x, y: localTranslate.value.y }
       : { x: props.translateX, y: props.translateY };
 })
 
-// 计算缩略图尺寸（保持比例）
+// 计算缩略图实际尺寸（保持比例）
 const thumbSize = computed(() => {
   const { naturalWidth, naturalHeight } = props;
   if (!naturalWidth || !naturalHeight) return { width: 0, height: 0, scale: 1 };
@@ -78,20 +72,33 @@ const viewportRect = computed(() => {
   const { naturalWidth, naturalHeight, viewportWidth, viewportHeight, scale } = props;
   if (!naturalWidth || !naturalHeight) return null;
 
-  const displayedWidth = naturalWidth * scale;
-  const displayedHeight = naturalHeight * scale;
+  const imgX = (-viewportWidth / 2 - activeTranslate.value.x) / scale + naturalWidth / 2;
+  const imgY = (-viewportHeight / 2 - activeTranslate.value.y) / scale + naturalHeight / 2;
+  const imgW = viewportWidth / scale;
+  const imgH = viewportHeight / scale;
 
-  const offsetX = (displayedWidth - viewportWidth) / 2 - activeTranslate.value.x;
-  const offsetY = (displayedHeight - viewportHeight) / 2 - activeTranslate.value.y;
+  const x = Math.max(0, imgX);
+  const y = Math.max(0, imgY);
+  const w = Math.min(naturalWidth, imgX + imgW) - x;
+  const h = Math.min(naturalHeight, imgY + imgH) - y;
 
   const thumbScale = thumbSize.value.scale;
-
   return {
-    x: (offsetX / scale) * thumbScale,
-    y: (offsetY / scale) * thumbScale,
-    width: (viewportWidth / scale) * thumbScale,
-    height: (viewportHeight / scale) * thumbScale
+    x: x * thumbScale,
+    y: y * thumbScale,
+    width: w * thumbScale,
+    height: h * thumbScale
   };
+});
+
+// fit 时视窗框覆盖整个缩略图，去掉白边避免边缘出现一条白线
+const isViewportFull = computed(() => {
+  const r = viewportRect.value;
+  if (!r || !thumbSize.value.width || !thumbSize.value.height) return false;
+  return r.x <= 0.5
+      && r.y <= 0.5
+      && Math.abs(r.width - thumbSize.value.width) <= 0.5
+      && Math.abs(r.height - thumbSize.value.height) <= 0.5;
 });
 
 // 将缩略图坐标转换为 translate 值
@@ -112,42 +119,42 @@ const startSmoothingLoop = () => {
   isAnimating.value = true;
 
   const loop = () => {
-    // 计算当前位置与目标位置的距离
     const dx = targetTranslate.value.x - localTranslate.value.x;
     const dy = targetTranslate.value.y - localTranslate.value.y;
 
-    // 【核心修复】：只有在“没有拖拽” 且 “距离极其接近”时，才允许关闭动画引擎
     if (!isDragging.value && Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
       localTranslate.value = { x: targetTranslate.value.x, y: targetTranslate.value.y };
       emit('navigate', localTranslate.value.x, localTranslate.value.y);
       isAnimating.value = false;
-      return; // 此时才真正结束循环
+      return;
     }
 
-    // 平滑插值：每次移动剩余距离的 35%
     const smoothingFactor = 0.35;
     localTranslate.value = {
       x: localTranslate.value.x + dx * smoothingFactor,
       y: localTranslate.value.y + dy * smoothingFactor
     };
 
-    // 将平滑后的坐标传给主图
     emit('navigate', localTranslate.value.x, localTranslate.value.y);
-
-    // 请求下一帧，保持引擎运转
     animationFrameId = requestAnimationFrame(loop);
   };
 
   loop();
 };
 
-// 开始拖动
 const handleMouseDown = (e: MouseEvent) => {
+  if (props.isLoading) return;
   isDragging.value = true;
 
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-  const clickX = e.clientX - rect.left;
-  const clickY = e.clientY - rect.top;
+  const clickXOuter = e.clientX - rect.left;
+  const clickYOuter = e.clientY - rect.top;
+
+  const offsetX = (MAX_THUMB_WIDTH - thumbSize.value.width) / 2;
+  const offsetY = (MAX_THUMB_HEIGHT - thumbSize.value.height) / 2;
+
+  const clickX = clickXOuter - offsetX;
+  const clickY = clickYOuter - offsetY;
 
   const rawTranslate = thumbPosToTranslate(clickX, clickY);
   const clampedTranslate = clampTranslate(rawTranslate.x, rawTranslate.y);
@@ -163,29 +170,20 @@ const handleMouseDown = (e: MouseEvent) => {
 
   window.addEventListener('mousemove', handleWindowMouseMove, { capture: true });
   window.addEventListener('mouseup', handleWindowMouseUp, { capture: true });
-
-  // 【核心修复：防线一】只要窗口失去焦点（比如系统截图介入），立刻强制中断拖拽
   window.addEventListener('blur', stopDragging);
 };
 
-// 拖动中
 const handleWindowMouseMove = (e: MouseEvent) => {
   if (!isDragging.value) return;
-
-  // 【核心修复：防线二】
-  // e.buttons 表示当前鼠标按下的物理按键。0 表示没有任何按键按下。
-  // 如果处于拖拽状态，但系统检测到鼠标左键其实没按下，说明发生了“事件吞噬”
   if (e.buttons === 0) {
     stopDragging();
     return;
   }
-
   e.stopPropagation();
   e.preventDefault();
 
   const deltaX = e.clientX - dragStartPos.value.x;
   const deltaY = e.clientY - dragStartPos.value.y;
-
   const thumbScale = thumbSize.value.scale;
   const deltaTranslateX = -(deltaX / thumbScale) * props.scale;
   const deltaTranslateY = -(deltaY / thumbScale) * props.scale;
@@ -193,117 +191,221 @@ const handleWindowMouseMove = (e: MouseEvent) => {
   const rawTargetX = dragStartTranslate.value.x + deltaTranslateX;
   const rawTargetY = dragStartTranslate.value.y + deltaTranslateY;
 
-  // 使用上一轮加的边界限制
   targetTranslate.value = clampTranslate(rawTargetX, rawTargetY);
 };
 
-// 结束拖动
 const handleWindowMouseUp = (e: MouseEvent) => {
   e.stopPropagation();
   stopDragging();
 };
 
+const handleWheel = (e: WheelEvent) => {
+  if (props.isLoading) return;
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const clickXOuter = e.clientX - rect.left;
+  const clickYOuter = e.clientY - rect.top;
+
+  const offsetX = (MAX_THUMB_WIDTH - thumbSize.value.width) / 2;
+  const offsetY = (MAX_THUMB_HEIGHT - thumbSize.value.height) / 2;
+
+  const thumbX = clickXOuter - offsetX;
+  const thumbY = clickYOuter - offsetY;
+
+  const direction = e.deltaY < 0 ? 'in' : 'out';
+  emit('zoom', direction, thumbX, thumbY);
+};
+
 const stopDragging = () => {
   if (!isDragging.value) return;
   isDragging.value = false;
+  targetTranslate.value = { x: localTranslate.value.x, y: localTranslate.value.y };
 
-  // 移除所有全局监听器
   window.removeEventListener('mousemove', handleWindowMouseMove, { capture: true });
   window.removeEventListener('mouseup', handleWindowMouseUp, { capture: true });
   window.removeEventListener('blur', stopDragging);
 };
 
+// ==========================================
+// 更可靠的动画禁用机制
+// ==========================================
+const suppressTransition = ref(true);
+let layoutTimeout: number | null = null;
+let fallbackTimeout: number | null = null;
+
+// 挂载后给予 100ms 的“无敌帧”
+// 完美吸收掉父组件 fitToScreen(双rAF 33ms) 带来的 scale 延迟突变
+onMounted(() => {
+  layoutTimeout = window.setTimeout(() => {
+    suppressTransition.value = false;
+  }, 100);
+});
+
+// 1. 图源只要一变，立刻禁用过渡动画
+watch(() => props.imageSrc, () => {
+  suppressTransition.value = true;
+
+  if (fallbackTimeout) clearTimeout(fallbackTimeout);
+  if (layoutTimeout) clearTimeout(layoutTimeout);
+
+  // 兜底机制：万一新图尺寸巧合般一致，导致布局 watcher 没触发，
+  // 我们最多等 500ms 强制恢复动画，以免影响后续用户的滚轮缩放体验
+  fallbackTimeout = window.setTimeout(() => {
+    suppressTransition.value = false;
+  }, 500);
+});
+
+// 2. 监听外部“排版结果”：等待父组件的异步计算真正落定。
+// 7 个 ref 的多源监听。写法上比 watch(() => [...], cb, { deep: true })
+// 更高效：不需要每次构造临时数组，也不需要 deep diff 每个元素；
+// Vue 跟踪每个 getter 的依赖，只有发生变化的源会触发回调。
+watch(
+  () => [
+    props.scale,
+    props.translateX,
+    props.translateY,
+    props.naturalWidth,
+    props.naturalHeight,
+    props.viewportWidth,
+    props.viewportHeight,
+  ],
+  () => {
+    if (suppressTransition.value) {
+      // 采用防抖：确保父组件分步更新上述属性时不会被提前放开动画
+      // 等到一切数据稳定，留出足够帧数给浏览器做无动画渲染后，再恢复能力
+      if (layoutTimeout) clearTimeout(layoutTimeout);
+      layoutTimeout = window.setTimeout(() => {
+        suppressTransition.value = false;
+      }, 60); // 延迟约 4 帧，确保 DOM 已经吸附到正确位置
+    }
+  },
+);
+
+watch(() => props.isLoading, (newVal) => {
+  if (newVal) {
+    suppressTransition.value = true;
+    if (isDragging.value) stopDragging();
+    if (isAnimating.value) {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      isAnimating.value = false;
+    }
+  }
+});
+
 onBeforeUnmount(() => {
   if (animationFrameId) cancelAnimationFrame(animationFrameId);
+  if (layoutTimeout) clearTimeout(layoutTimeout);
+  if (fallbackTimeout) clearTimeout(fallbackTimeout);
   window.removeEventListener('mousemove', handleWindowMouseMove, { capture: true });
   window.removeEventListener('mouseup', handleWindowMouseUp, { capture: true });
-  // 【新增清理】
   window.removeEventListener('blur', stopDragging);
 });
 </script>
 
 <template>
-  <Transition name="thumbnail-fade">
+  <div
+      class="thumbnail-navigator"
+      :class="{'is-dragging': isDragging}"
+  >
     <div
-        v-if="visible"
-        ref="navigatorRef"
-        class="thumbnail-navigator"
-        :style="{
-          width: `${thumbSize.width}px`,
-          height: `${thumbSize.height}px`
-        }"
-        :class="{'is-dragging': isDragging}"
+        class="interaction-area"
         @mousedown.stop.prevent="handleMouseDown"
         @mousemove.stop
         @mouseup.stop
-        @wheel.stop
+        @wheel.stop.prevent="handleWheel"
         @dblclick.stop
     >
-      <img
-          :src="imageSrc"
-          class="thumbnail-image"
-          draggable="false"
-          alt="Thumbnail"
-      />
-      <!-- 变暗遮罩：非视口区域变淡 -->
       <div
-          v-if="viewportRect"
-          class="dim-overlay"
-          :style="{
-            clipPath: `polygon(
-              0% 0%,
-              100% 0%,
-              100% 100%,
-              0% 100%,
-              0% 0%,
-              ${viewportRect.x}px ${viewportRect.y}px,
-              ${viewportRect.x}px ${viewportRect.y + viewportRect.height}px,
-              ${viewportRect.x + viewportRect.width}px ${viewportRect.y + viewportRect.height}px,
-              ${viewportRect.x + viewportRect.width}px ${viewportRect.y}px,
-              ${viewportRect.x}px ${viewportRect.y}px
-            )`
-          }"
+          v-if="isLoading"
+          class="thumbnail-skeleton"
+          :style="{ width: `${thumbSize.width}px`, height: `${thumbSize.height}px` }"
       />
-      <!-- 视窗框 -->
+
       <div
-          v-if="viewportRect"
-          class="viewport-rect"
-          :class="{ 'is-dragging': isDragging }"
-          :style="{
-            transform: `translate3d(${viewportRect.x}px, ${viewportRect.y}px, 0)`,
-            width: `${viewportRect.width}px`,
-            height: `${viewportRect.height}px`
-          }"
-      />
+          v-else
+          class="thumbnail-content"
+          :key="imageSrc"
+          :style="{ width: `${thumbSize.width}px`, height: `${thumbSize.height}px` }"
+      >
+        <img
+            :src="imageSrc"
+            class="thumbnail-image"
+            draggable="false"
+            alt="Thumbnail"
+        />
+
+        <div
+            v-if="viewportRect"
+            class="dim-overlay"
+            :class="{ 'is-dragging': isDragging, 'no-transition': suppressTransition }"
+            :style="{
+                clipPath: `polygon(
+                  0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%,
+                  ${viewportRect.x}px ${viewportRect.y}px,
+                  ${viewportRect.x}px ${viewportRect.y + viewportRect.height}px,
+                  ${viewportRect.x + viewportRect.width}px ${viewportRect.y + viewportRect.height}px,
+                  ${viewportRect.x + viewportRect.width}px ${viewportRect.y}px,
+                  ${viewportRect.x}px ${viewportRect.y}px
+                )`
+              }"
+        />
+
+        <div
+            v-if="viewportRect"
+            class="viewport-rect"
+            :class="{ 'is-dragging': isDragging, 'is-full': isViewportFull, 'no-transition': suppressTransition }"
+            :style="{
+                transform: `translate3d(${viewportRect.x}px, ${viewportRect.y}px, 0)`,
+                width: `${viewportRect.width}px`,
+                height: `${viewportRect.height}px`
+              }"
+        />
+      </div>
     </div>
-  </Transition>
+  </div>
 </template>
 
 <style scoped>
-/* 样式与原来保持一致即可，没有变化 */
 .thumbnail-navigator {
-  position: fixed;
-  right: 16px;
-  bottom: 72px;
-  background: rgba(0, 0, 0, 0.75);
-  border-radius: 8px;
-  overflow: hidden; /* 这里已经有 hidden 了，所以框超出自然会被裁切 */
-  cursor: crosshair;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  z-index: 50;
-  transition: all 0.2s ease;
+  width: 100%;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
   user-select: none;
 }
 
-.thumbnail-navigator:hover {
-  border-color: rgba(255, 255, 255, 0.5);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+.interaction-area {
+  width: 200px;
+  height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: crosshair;
 }
 
-.thumbnail-navigator.is-dragging {
+.interaction-area:active {
   cursor: grabbing;
-  border-color: #60a5fa;
+}
+
+.thumbnail-content {
+  position: relative;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.thumbnail-skeleton {
+  border-radius: 4px;
+  background: var(--glass-fill);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  animation: thumbnail-skeleton-pulse 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes thumbnail-skeleton-pulse {
+  0% { opacity: 0.35; }
+  100% { opacity: 0.7; }
 }
 
 .thumbnail-image {
@@ -311,7 +413,7 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: contain;
   display: block;
-  opacity: 0.85;
+  opacity: 0.9;
   pointer-events: none;
 }
 
@@ -321,7 +423,7 @@ onBeforeUnmount(() => {
   top: 0;
   width: 100%;
   height: 100%;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.6);
   pointer-events: none;
   transition: clip-path 0.25s cubic-bezier(0.25, 1, 0.5, 1);
 }
@@ -330,32 +432,26 @@ onBeforeUnmount(() => {
   position: absolute;
   left: 0;
   top: 0;
-  border: 1px solid #ffffff;
-  background: rgba(96, 165, 250, 0.25);
+  border: 1.5px solid #ffffff;
+  background: var(--ui-accent-soft);
   pointer-events: none;
-  /*box-shadow:
-      0 0 0 1px rgba(0, 0, 0, 0.5),
-      inset 0 0 0 1px rgba(255, 255, 255, 0.3),
-      0 0 8px rgba(96, 165, 250, 0.5);*/
   border-radius: 2px;
   will-change: transform;
   transition: transform 0.25s cubic-bezier(0.25, 1, 0.5, 1),
   width 0.2s ease,
-  height 0.2s ease;
+  height 0.2s ease,
+  border-color 0.2s ease;
 }
 
-.viewport-rect.is-dragging {
-  transition: none;
+.viewport-rect.is-full {
+  border-color: transparent;
 }
 
-.thumbnail-fade-enter-active,
-.thumbnail-fade-leave-active {
-  transition: opacity 0.3s ease, transform 0.3s ease;
-}
-
-.thumbnail-fade-enter-from,
-.thumbnail-fade-leave-to {
-  opacity: 0;
-  transform: translateY(10px);
+/* 🚀 增加 !important 保障强制清除 transition 优先级 */
+.viewport-rect.is-dragging,
+.dim-overlay.is-dragging,
+.viewport-rect.no-transition,
+.dim-overlay.no-transition {
+  transition: none !important;
 }
 </style>

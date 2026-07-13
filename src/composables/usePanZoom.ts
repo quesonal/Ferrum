@@ -224,6 +224,9 @@ export function usePanZoom({viewportRef, imgRef}: PanZoomOptions) {
     stopDrag,
     zoomIn: () => performZoom('in'),
     zoomOut: () => performZoom('out'),
+    zoomAtPoint: (direction: 'in' | 'out', fixedPoint: { x: number, y: number }) => {
+      performZoom(direction, fixedPoint);
+    },
     getConstrainedTranslate: (targetX: number, targetY: number, currentScale?: number) => {
       return getConstrainedTranslate(targetX, targetY, currentScale ?? scale.value);
     }

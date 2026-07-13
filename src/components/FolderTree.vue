@@ -104,15 +104,24 @@ function handleSelect(hash: string | null, path: string) {
       <div v-for="item in visibleList" :key="item.node.path"
            class="tree-node"
            :class="{ 'is-selected': item.node.path === selectedPath }"
-           :style="{ transform: `translateY(${item.top}px)`, paddingLeft: `${item.level * 12 + 8}px` }"
+           :style="{ transform: `translateY(${item.top}px)`, paddingLeft: `calc(var(--tree-indent) * ${item.level} + 8px)` }"
            @click="handleSelect(item.node.folderHash, item.node.path)">
 
         <span class="expand-icon" :class="{ 'is-hidden': !item.hasChildren }"
               @click.stop="store.toggleNodeExpanded(item.node.path)">
-          {{ item.isExpanded ? '▼' : '▶' }}
+          <div :class="item.isExpanded ? 'i-mdi-chevron-down' : 'i-mdi-chevron-right'"></div>
         </span>
 
-        <span class="folder-icon">{{ item.hasChildren ? '📁' : '📂' }}</span>
+        <span
+            class="folder-icon"
+            :class="
+              !item.hasChildren
+                ? 'i-mdi-folder'
+                : item.isExpanded
+                  ? 'i-mdi-folder-open'
+                  : 'i-mdi-folder'
+            "
+        ></span>
 
         <div class="folder-info">
           <span class="folder-name" :title="item.node.path">{{ item.node.name }}</span>
@@ -157,14 +166,16 @@ function handleSelect(hash: string | null, path: string) {
   user-select: none;
   contain: layout paint size; /* 极致渲染性能 */
   will-change: transform;
+  /* hover/selected 走同一套 fill 体系：hover 浅、selected 深 */
+  transition: background-color 0.12s ease;
 }
 
 .tree-node:hover {
-  background: var(--btn-hover);
+  background: var(--ui-row-hover);
 }
 
 .tree-node.is-selected {
-  background: rgba(74, 158, 255, 0.15);
+  background: var(--ui-accent-soft);
 }
 
 .expand-icon {
@@ -173,13 +184,15 @@ function handleSelect(hash: string | null, path: string) {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: 16px;
+  line-height: 1;
   color: var(--ui-text-dim);
   border-radius: 3px;
+  flex-shrink: 0;
 }
 
 .expand-icon:hover {
-  background: rgba(128, 128, 128, 0.2);
+  background: var(--ui-btn-hover);
   color: var(--ui-text);
 }
 
@@ -189,21 +202,26 @@ function handleSelect(hash: string | null, path: string) {
 }
 
 .folder-icon {
-  font-size: 14px;
+  font-size: 16px;
+  line-height: 1;
   flex-shrink: 0;
+  color: var(--ui-text-dim);
 }
 
 .folder-info {
   flex: 1;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
   overflow: hidden;
 }
 
 .folder-name {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -211,9 +229,9 @@ function handleSelect(hash: string | null, path: string) {
 }
 
 .image-count {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ui-text-dim);
-  margin-left: 8px;
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 </style>

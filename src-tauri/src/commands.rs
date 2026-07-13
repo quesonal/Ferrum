@@ -87,9 +87,28 @@ pub async fn get_image_list(app: AppHandle, path: String) -> AppResult<Vec<Strin
 
 
 #[tauri::command]
+#[tracing::instrument(level = "info", name = "cmd::show_main_window", skip(window))]
 pub async fn show_main_window(window: WebviewWindow) {
     let _ = window.show();
     let _ = window.set_focus();
+    tracing::info!(target: "startup", "main window shown and focused");
+}
+
+#[tauri::command]
+pub async fn toggle_fullscreen(window: WebviewWindow) -> Result<bool, String> {
+    let is_fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
+
+    if is_fullscreen {
+        window.set_fullscreen(false).map_err(|e| e.to_string())?;
+    } else {
+        // 最大化状态下先退出最大化，防止 WebView2 布局不跟随窗口扩展
+        if window.is_maximized().unwrap_or(false) {
+            window.unmaximize().map_err(|e| e.to_string())?;
+        }
+        window.set_fullscreen(true).map_err(|e| e.to_string())?;
+    }
+
+    Ok(!is_fullscreen)
 }
 
 #[tauri::command]
@@ -161,21 +180,39 @@ pub fn get_exif_data(path: String) -> AppResult<ExifInfo> {
 
     if let Ok(exif) = Reader::new().read_from_container(&mut reader) {
         // Camera make and model
+        let clean_string = |s: String| {
+            let c = s.trim_matches('"').trim().to_string();
+            if c.is_empty() { None } else { Some(c) }
+        };
         let make = exif.get_field(Tag::Make, exif::In::PRIMARY)
-            .map(|f| f.display_value().to_string());
+            .map(|f| f.display_value().to_string())
+            .and_then(clean_string);
         let model = exif.get_field(Tag::Model, exif::In::PRIMARY)
-            .map(|f| f.display_value().to_string());
+            .map(|f| f.display_value().to_string())
+            .and_then(clean_string);
 
         exif_info.camera = match (make, model) {
-            (Some(m), Some(mdl)) => Some(format!("{} {}", m.trim_matches('"'), mdl.trim_matches('"'))),
-            (Some(m), None) => Some(m.trim_matches('"').to_string()),
-            (None, Some(mdl)) => Some(mdl.trim_matches('"').to_string()),
+            (Some(m), Some(mdl)) => Some(format!("{} {}", m, mdl)),
+            (Some(m), None) => Some(m),
+            (None, Some(mdl)) => Some(mdl),
             _ => None,
         };
 
-        // Lens
+        // Lens — 从原始字节提取字符串，截断到第一个空字节
         exif_info.lens = exif.get_field(Tag::LensModel, exif::In::PRIMARY)
-            .map(|f| f.display_value().to_string().trim_matches('"').to_string());
+            .and_then(|f| match &f.value {
+                exif::Value::Ascii(v) => v.first().and_then(|bytes| {
+                    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                    let s = String::from_utf8_lossy(&bytes[..end]).into_owned();
+                    let cleaned = s.trim_matches('"').trim();
+                    if cleaned.is_empty() { None } else { Some(cleaned.to_string()) }
+                }),
+                _ => {
+                    let s = f.display_value().to_string();
+                    let cleaned = s.trim_matches('"').trim().to_string();
+                    if cleaned.is_empty() { None } else { Some(cleaned) }
+                }
+            });
 
         // ISO
         exif_info.iso = exif.get_field(Tag::PhotographicSensitivity, exif::In::PRIMARY)
@@ -199,8 +236,72 @@ pub fn get_exif_data(path: String) -> AppResult<ExifInfo> {
 
         // Date taken
         exif_info.date_taken = exif.get_field(Tag::DateTimeOriginal, exif::In::PRIMARY)
-            .map(|f| f.display_value().to_string().trim_matches('"').to_string());
+            .map(|f| f.display_value().to_string())
+            .map(|s| s.trim_matches('"').trim().to_string());
+    }
+    Ok(exif_info)
+}
+
+/// 检查路径是否可以通过 asset 协议访问（尝试 canonicalize）
+/// 用于在请求前预判 ImDisk 等虚拟盘是否会触发 403
+#[tauri::command]
+pub fn check_asset_accessible(path: String) -> bool {
+    match std::fs::canonicalize(&path) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("[check_asset_accessible] canonicalize failed for '{}': {}", path, e);
+            false
+        }
+    }
+}
+
+/// 删除文件：permanent=false 走系统回收站（可恢复），permanent=true 永久删除。
+/// 错误通过 AppError 自动序列化返回前端，由前端决定是否提示用户。
+#[tauri::command]
+pub async fn delete_file(path: String, permanent: bool) -> AppResult<()> {
+    if permanent {
+        tokio::fs::remove_file(&path).await?;
+    } else {
+        // trash::Error 不实现 Into<AppError>，手动转 Anyhow 走通用错误通道
+        trash::delete(&path).map_err(|e| AppError::Anyhow(anyhow::Error::new(e)))?;
+    }
+    Ok(())
+}
+
+/// Frontend 写入 Chrome trace 事件的通道。接收一个 JSON 数组（每条事件
+/// 都是 Perfetto/Chrome trace 格式的对象），写到 `path`。
+/// 仅在 `flamegraph` feature 启用时由前端调用（路径由 `__FRONTEND_TRACE_PATH__`
+/// 注入），release 构建里前端不会发请求，本函数也不会被注册。
+#[cfg(feature = "flamegraph")]
+#[tauri::command]
+#[tracing::instrument(level = "info", name = "frontend::write_perf", skip_all, fields(event_count = tracing::field::Empty, path = %path))]
+pub fn write_frontend_perf(events: serde_json::Value, path: String) -> Result<(), String> {
+    let event_count = events.as_array().map(|a| a.len()).unwrap_or(0);
+    tracing::Span::current().record("event_count", event_count);
+    use std::path::PathBuf;
+
+    let path = PathBuf::from(&path);
+
+    // Safety: only allow writing to a path the Rust side explicitly
+    // declared via profile::init. Frontend is untrusted, but we still
+    // refuse to write outside the explicit allowlist.
+    let allowed = crate::profile::frontend_trace_path();
+    match allowed {
+        Some(ref p) if p == &path => {}
+        _ => {
+            return Err(format!(
+                "write_frontend_perf: path '{}' is not the configured frontend trace path",
+                path.display()
+            ));
+        }
     }
 
-    Ok(exif_info)
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+
+    let serialized = serde_json::to_string(&events).map_err(|e| e.to_string())?;
+    std::fs::write(&path, serialized).map_err(|e| e.to_string())
 }

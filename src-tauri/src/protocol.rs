@@ -2,6 +2,7 @@ use crate::cache::TRANSCODE_CACHE;
 use crate::formats;
 use std::fs::File;
 use std::io::{BufReader, Cursor};
+use std::path::Path;
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::Runtime;
 use url::Url;
@@ -14,6 +15,29 @@ fn error_response(status: StatusCode, msg: String) -> Response<Vec<u8>> {
         .unwrap()
 }
 
+// `img_protocol_handler` is profiled with `#[tracing::instrument]` so the
+// whole request shows up in Perfetto. Child spans are added by hand around
+// the heaviest sub-phases so image-switch flame graphs can tell apart:
+//   - url_parse           (<1ms typical)
+//   - decode_extension    (<1ms)
+//   - native_read_file    (fs::read, big chunk of native-format latency)
+//   - transcode_decode    (image::load for TIFF/DDS/JXL/EXR/RAW)
+//   - transcode_resize    (>4096px images only)
+//   - transcode_encode    (WebP write, dominant for transcoded formats)
+//   - cache_get / cache_put  (moka operations)
+// invoked from JS via `convertFileSrc(path, 'img')`.
+#[tracing::instrument(
+    name = "img_protocol_handler",
+    level = "info",
+    skip_all,
+    fields(
+        method = %request.method(),
+        url_full = %request.uri(),
+        bytes = tracing::field::Empty,
+        cache = tracing::field::Empty,
+        ext_kind = tracing::field::Empty,
+    )
+)]
 pub fn img_protocol_handler<R: Runtime>(
     _ctx: &tauri::UriSchemeContext<'_, R>,
     request: &Request<Vec<u8>>,
@@ -29,20 +53,23 @@ pub fn img_protocol_handler<R: Runtime>(
             .unwrap();
     }
 
-    // 2. 解析 URL
+    // 2. URL parse + extension
     let url_str = request.uri().to_string();
-    let url = match Url::parse(&url_str) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("[Protocol] URL parse error: {}", e);
-            return error_response(StatusCode::BAD_REQUEST, "Invalid URL".into());
+    let url = {
+        let _s = tracing::info_span!("img_proto::url_parse").entered();
+        match Url::parse(&url_str) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("[Protocol] URL parse error: {}", e);
+                return error_response(StatusCode::BAD_REQUEST, "Invalid URL".into());
+            }
         }
     };
 
     // 3. 路径解码
     let path_str = url.path().trim_start_matches('/');
     let decoded_path = match urlencoding::decode(path_str) {
-        Ok(p) => p,
+        Ok(p) => p.into_owned(),
         Err(e) => return error_response(StatusCode::BAD_REQUEST, format!("Decode error: {}", e)),
     };
 
@@ -51,46 +78,58 @@ pub fn img_protocol_handler<R: Runtime>(
         return error_response(StatusCode::BAD_REQUEST, "Invalid path".into());
     }
 
-    // 解析为规范化的绝对路径，防止路径穿越攻击
-    let canonical_path = match std::fs::canonicalize(decoded_path.as_ref()) {
-        Ok(p) => p,
-        Err(_) => return error_response(StatusCode::NOT_FOUND, "File not found".into()),
-    };
-
-    // 验证是文件而非目录
-    if !canonical_path.is_file() {
+    // 4. 文件存在性 + 扩展名
+    let file_path = Path::new(&decoded_path);
+    if !file_path.is_file() {
         return error_response(StatusCode::NOT_FOUND, "Not a file".into());
     }
 
-    let ext = canonical_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = {
+        let _s = tracing::info_span!("img_proto::decode_extension").entered();
+        file_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+    };
 
-    // 4. 构建响应头
+    // 5. 构建响应头
     let response_builder = Response::builder()
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(header::CACHE_CONTROL, "public, max-age=3600");
 
-    // 5. 判断是否需要转码
+    // 6. native 路径（jpg/png/gif/webp/avif/svg/ico/bmp）
     if !formats::needs_transcode(&ext) {
-        let mime = mime_guess::from_path(&canonical_path).first_or_octet_stream();
+        tracing::Span::current().record("ext_kind", "native");
+        let mime = mime_guess::from_path(file_path).first_or_octet_stream();
 
-        match std::fs::read(&canonical_path) {
-            Ok(data) => return response_builder
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .body(data)
-                .unwrap(),
-            Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        }
+        let data = {
+            let _s = tracing::info_span!("img_proto::native_read_file").entered();
+            match std::fs::read(file_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                }
+            }
+        };
+        tracing::Span::current().record("bytes", data.len());
+        return response_builder
+            .header(header::CONTENT_TYPE, mime.as_ref())
+            .body(data)
+            .unwrap();
     }
 
-    // 6. 转码逻辑 (WebP) - 带缓存
-    let cache_key = canonical_path.to_string_lossy().to_string();
+    // 7. transcode 路径 (TIFF/DDS/JXL/EXR/RAW)
+    tracing::Span::current().record("ext_kind", "transcode");
+    let cache_key = decoded_path.to_string();
 
     // 先检查缓存
-    if let Some(cached_data) = TRANSCODE_CACHE.get(&cache_key) {
+    if let Some(cached_data) = {
+        let _s = tracing::info_span!("img_proto::cache_get").entered();
+        TRANSCODE_CACHE.get(&cache_key)
+    } {
+        tracing::Span::current().record("cache", "HIT");
+        tracing::Span::current().record("bytes", cached_data.len());
         return response_builder
             .header(header::CONTENT_TYPE, "image/webp")
             .header("X-Cache", "HIT")
@@ -98,37 +137,49 @@ pub fn img_protocol_handler<R: Runtime>(
             .unwrap();
     }
 
-    // 缓存未命中，执行转码
+    // 缓存未命中，执行完整转码
     let transcode_result: anyhow::Result<Vec<u8>> = (|| {
-        let file = File::open(&canonical_path)?;
-        let reader = BufReader::new(file);
+        let (mut img, _fmt) = {
+            let _s = tracing::info_span!("img_proto::transcode_decode").entered();
+            let file = File::open(file_path)?;
+            let reader = BufReader::new(file);
+            let fmt = image::ImageFormat::from_path(file_path).unwrap_or(image::ImageFormat::Jpeg);
+            let img = image::load(reader, fmt)?;
+            (img, fmt)
+        };
 
-        // 使用流式解码减少内存占用
-        let mut img = image::load(
-            reader,
-            image::ImageFormat::from_path(&canonical_path).unwrap_or(image::ImageFormat::Jpeg),
-        )?;
-
-        // 限制最大分辨率，避免超大图片导致性能问题
+        // 限制最大分辨率
         const MAX_DIMENSION: u32 = 4096;
         let (width, height) = (img.width(), img.height());
         if width > MAX_DIMENSION || height > MAX_DIMENSION {
-            img = img.resize(
-                MAX_DIMENSION,
-                MAX_DIMENSION,
-                image::imageops::FilterType::Triangle, // 三角滤波器更快
-            );
+            img = {
+                let _s = tracing::info_span!("img_proto::transcode_resize").entered();
+                img.resize(
+                    MAX_DIMENSION,
+                    MAX_DIMENSION,
+                    image::imageops::FilterType::Triangle, // 三角滤波器更快
+                )
+            };
         }
 
         let mut buffer = Cursor::new(Vec::new());
-        img.write_to(&mut buffer, image::ImageFormat::WebP)?;
-        Ok(buffer.into_inner())
+        let data = {
+            let _s = tracing::info_span!("img_proto::transcode_encode").entered();
+            img.write_to(&mut buffer, image::ImageFormat::WebP)?;
+            buffer.into_inner()
+        };
+        Ok(data)
     })();
 
     match transcode_result {
         Ok(data) => {
+            tracing::Span::current().record("cache", "MISS");
+            tracing::Span::current().record("bytes", data.len());
             // 存入缓存
-            TRANSCODE_CACHE.put(cache_key, data.clone());
+            {
+                let _s = tracing::info_span!("img_proto::cache_put").entered();
+                TRANSCODE_CACHE.put(cache_key, data.clone());
+            }
 
             response_builder
                 .header(header::CONTENT_TYPE, "image/webp")

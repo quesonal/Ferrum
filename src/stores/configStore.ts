@@ -1,6 +1,7 @@
 import {defineStore} from 'pinia';
 import {ref, watch} from 'vue';
-import {invoke} from '@tauri-apps/api/core';
+import {loadConfig as loadConfigCmd, saveConfig as saveConfigCmd} from '../api/commands';
+import {takeAppConfig} from '../api/windowEnv';
 
 export enum MouseAction {
     None = 'none',
@@ -18,6 +19,7 @@ export enum MouseAction {
     Backward10 = 'backward_10',
     ZoomIn = 'zoom_in',
     ZoomOut = 'zoom_out',
+    Zoom = 'zoom',
     ShowExif = 'show_exif',
     FitWindow = 'fit_window',
 }
@@ -25,11 +27,6 @@ export enum MouseAction {
 export enum AppTheme {
     Dark = 'dark',
     Light = 'light',
-}
-
-export enum FitMode {
-    Contain = 'contain',
-    Original = 'original',
 }
 
 export enum ScanMode {
@@ -42,10 +39,11 @@ export enum ScanMode {
 // 2. 更新接口类型
 export interface AppConfig {
     background_color: string;
-    default_fit_mode: FitMode;
+
     show_control_bar: boolean;
     show_histogram: boolean;
     theme: AppTheme;
+    language: string;
     mouse_left: MouseAction;
     mouse_right: MouseAction;
     mouse_middle: MouseAction;
@@ -55,24 +53,29 @@ export interface AppConfig {
     mouse_wheel_down: MouseAction;
     scan_mode: ScanMode;
     scan_folders: string[];
+    delete_confirm: boolean;
 }
+
+let syncCacheTimer: number | null = null;
 
 export const useConfigStore = defineStore('config', () => {
     const config = ref<AppConfig>({
         background_color: '#ffffff',
-        default_fit_mode: FitMode.Contain,
+
         show_control_bar: true,
         show_histogram: false,
         theme: AppTheme.Light,
+        language: 'en',
         mouse_left: MouseAction.None,
         mouse_right: MouseAction.None,
         mouse_middle: MouseAction.FullScreen,
         mouse_xbutton1: MouseAction.PrevImage,
         mouse_xbutton2: MouseAction.NextImage,
-        mouse_wheel_up: MouseAction.ZoomIn,
-        mouse_wheel_down: MouseAction.ZoomOut,
+        mouse_wheel_up: MouseAction.Zoom,
+        mouse_wheel_down: MouseAction.Zoom,
         scan_mode: ScanMode.Auto,
         scan_folders: [],
+        delete_confirm: true,
     });
 
     watch(() => config.value.theme, (newTheme) => {
@@ -91,23 +94,30 @@ export const useConfigStore = defineStore('config', () => {
     };
 
     const syncToCache = (cfg: AppConfig) => {
-        // 镜像一份配置到本地存储，仅供 index.html 快速读取
-        localStorage.setItem('app_config_cache', JSON.stringify({
-            theme: cfg.theme,
-            background_color: cfg.background_color
-        }));
+        if (syncCacheTimer !== null) {
+            clearTimeout(syncCacheTimer);
+        }
+        syncCacheTimer = window.setTimeout(() => {
+            // 镜像一份配置到本地存储，仅供 index.html 快速读取
+            localStorage.setItem('app_config_cache', JSON.stringify({
+                theme: cfg.theme,
+                background_color: cfg.background_color,
+                language: cfg.language
+            }));
+            syncCacheTimer = null;
+        }, 500);
     };
 
     const loadConfig = async () => {
-        if ((window as any).__APP_CONFIG__) {
-            config.value = (window as any).__APP_CONFIG__;
+        const fromGlobal = takeAppConfig();
+        if (fromGlobal) {
+            config.value = fromGlobal;
             applyTheme(config.value.theme);
-            (window as any).__APP_CONFIG__ = null;
             return;
         }
 
         try {
-            const loaded = await invoke<AppConfig>('load_config_cmd');
+            const loaded = await loadConfigCmd();
             config.value = loaded;
             applyTheme(loaded.theme);
             syncToCache(loaded);
@@ -118,16 +128,22 @@ export const useConfigStore = defineStore('config', () => {
 
     const saveConfig = async () => {
         try {
-            await invoke('save_config_cmd', {config: config.value});
+            await saveConfigCmd(config.value);
             syncToCache(config.value);
         } catch (e) {
             console.error('Failed to save config:', e);
         }
     };
 
+    const setLanguage = async (lang: string) => {
+        config.value.language = lang;
+        await saveConfig();
+    };
+
     return {
         config,
         loadConfig,
-        saveConfig
+        saveConfig,
+        setLanguage
     };
 });

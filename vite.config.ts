@@ -18,19 +18,18 @@ export default defineConfig(async () => ({
     }),
   ],
   build: {
-    target: 'modules',
-    minify: 'esbuild' as const,
+    target: 'es2022',
+    cssMinify: 'esbuild',
     sourcemap: false,
-    rollupOptions: {
-      output: {
-        manualChunks: () => 'everything.js'
-      }
-    },
+    // rollupOptions: {
+    //   output: {
+    //     manualChunks: () => 'everything.js'
+    //   }
+    // },
     // HiDPI 优化：确保 CSS 中的像素单位正确处理
     cssTarget: 'chrome80'
   },
   css: {
-    // 支持 CSS 变量和 HiDPI 相关特性
     devSourcemap: true
   },
 

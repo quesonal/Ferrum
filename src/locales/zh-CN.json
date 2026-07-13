@@ -1,0 +1,147 @@
+{
+  "app": {
+    "title": "Ferrum",
+    "toggleLibrary": "切换图库 (L)",
+    "library": "📚 图库",
+    "clickToFit": "点击适应窗口"
+  },
+  "settings": {
+    "title": "设置",
+    "tabs": {
+      "general": "常规",
+      "mouse": "鼠标",
+      "tags": "标签"
+    },
+    "theme": "主题",
+    "dark": "深色",
+    "light": "浅色",
+    "language": "语言",
+    "canvasBackground": "画布背景色",
+    "resetDefault": "恢复默认",
+
+    "showControlBar": "显示底部控制栏",
+    "showHistogram": "显示直方图与EXIF",
+    "confirmBeforeDelete": "删除前确认",
+    "confirmBeforeDeleteHint": "关闭后 Del / Shift+Del 直接删除不再弹窗",
+    "scanMode": "扫描模式",
+    "scanModeOptions": {
+      "auto": "自动 (Everything → WalkDir)",
+      "everything": "Everything (最快，需安装Everything)",
+      "mft": "MFT (快速，需管理员权限)",
+      "walkdir": "WalkDir (兼容模式)"
+    },
+    "scanModeDescriptions": {
+      "auto": "自动选择最佳可用方法",
+      "everything": "需要安装并运行 VoidTools Everything",
+      "mft": "在 Windows 上需要管理员权限",
+      "walkdir": "标准文件系统扫描，适用于所有环境"
+    },
+    "librarySources": "图库来源",
+    "addFolder": "添加文件夹",
+    "noFolders": "未配置文件夹",
+    "rescan": "重新扫描",
+    "removeSource": "移除来源",
+    "done": "完成",
+    "mouse": {
+      "buttons": "鼠标按键",
+      "wheel": "鼠标滚轮",
+      "leftClick": "左键",
+      "rightClick": "右键",
+      "middleClick": "中键",
+      "sideButton1": "侧键 1 (后退)",
+      "sideButton2": "侧键 2 (前进)",
+      "wheelUp": "滚轮上",
+      "wheelDown": "滚轮下"
+    },
+    "actions": {
+      "none": "无操作",
+      "fullScreen": "全屏",
+      "maximize": "最大化",
+      "minimize": "最小化",
+      "exit": "退出",
+      "openFile": "打开文件",
+      "openFolder": "打开文件夹",
+      "nextImage": "下一张",
+      "prevImage": "上一张",
+      "firstImage": "首张图片",
+      "lastImage": "末尾图片",
+      "forward10": "向后10张图片",
+      "backward10": "向前10张图片",
+      "zoomIn": "放大",
+      "zoomOut": "缩小",
+      "zoom": "缩放",
+      "showExif": "显示Exif",
+      "fitWindow": "适应窗口"
+    },
+    "tags": {
+      "newTag": "新建标签",
+      "newTagPlaceholder": "标签名称",
+      "create": "创建",
+      "save": "保存",
+      "empty": "暂无标签",
+      "rename": "重命名",
+      "renamePrompt": "新名称",
+      "delete": "删除",
+      "deleteConfirmTitle": "删除标签",
+      "deleteConfirmMessage": "确定删除标签「{name}」？关联到图片的标签也会一并清除。"
+    }
+  },
+  "exif": {
+    "rgbHistogram": "RGB 直方图",
+    "title": "EXIF",
+    "dimensions": "尺寸",
+    "size": "大小",
+    "type": "类型",
+    "camera": "相机",
+    "lens": "镜头",
+    "iso": "ISO",
+    "aperture": "光圈",
+    "shutter": "快门",
+    "focalLength": "焦距",
+    "date": "日期"
+  },
+  "library": {
+    "noFolders": "暂无扫描文件夹",
+    "images": "张图片",
+    "folders": "个文件夹",
+    "tagsSection": {
+      "title": "标签",
+      "imageCount": "{count} 张图片"
+    },
+    "tagFilter": {
+      "active": "正在按标签筛选"
+    }
+  },
+  "delete": {
+    "trashTitle": "移到回收站",
+    "trashMessage": "确定将「{name}」移到回收站？之后可以从回收站还原。",
+    "trashConfirm": "移到回收站",
+    "permanentTitle": "永久删除",
+    "permanentMessage": "确定永久删除「{name}」？此操作不可撤销。",
+    "permanentConfirm": "永久删除"
+  },
+  "scrollbar": {
+    "scrollToTop": "回到顶部",
+    "scrollToBottom": "到达底部"
+  },
+  "imageView": {
+    "tags": {
+      "addTag": "添加标签",
+      "noTags": "暂无标签",
+      "remove": "移除",
+      "title": "标签"
+    }
+  },
+  "tagPicker": {
+    "title": "标签",
+    "searchPlaceholder": "搜索或创建...",
+    "createNew": "创建「{name}」",
+    "noMatches": "无匹配",
+    "selectedCount": "已选 {n} 个",
+    "cancel": "取消",
+    "apply": "应用"
+  },
+  "metaBackfill": {
+    "indexing": "正在建立索引 {processed} / {total}"
+  }
+}
